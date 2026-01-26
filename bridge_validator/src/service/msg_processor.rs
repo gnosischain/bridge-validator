@@ -1,0 +1,448 @@
+use crate::config::Config;
+use alloy::primitives::{Address, Bytes};
+use alloy::sol_types::SolEvent;
+use alloy_primitives::Log;
+use reqwest;
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use std::error::Error;
+use tokio::sync::mpsc::Sender;
+use tokio::time::{sleep, Duration};
+
+use crate::contracts::{
+    AmbEthCalldata, AmbGcCalldata, OnChainCallData, XdaiEthCalldata, XdaiGcCalldata, AMB_BRIDGE,
+    XDAI_BRIDGE,
+};
+use alloy::primitives::{FixedBytes, U256};
+use alloy::{
+    hex,
+    signers::{local::PrivateKeySigner, Signer},
+};
+use dotenv::dotenv;
+use std::env;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct BeaconBlockResponse {
+    data: BlockData,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct BlockData {
+    message: BlockMessage,
+    #[serde(default)]
+    signature: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct BlockMessage {
+    #[serde(default)]
+    slot: Option<String>,
+    #[serde(default)]
+    proposer_index: Option<String>,
+    #[serde(default)]
+    parent_root: Option<String>,
+    #[serde(default)]
+    state_root: Option<String>,
+    body: BlockBody,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct BlockBody {
+    #[serde(default)]
+    randao_reveal: Option<String>,
+    #[serde(default)]
+    eth1_data: Option<Eth1Data>,
+    #[serde(default)]
+    graffiti: Option<String>,
+    #[serde(default)]
+    proposer_slashings: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    attester_slashings: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    attestations: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    deposits: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    voluntary_exits: Option<Vec<serde_json::Value>>,
+    execution_payload: ExecutionPayload,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExecutionPayload {
+    #[serde(default)]
+    parent_hash: Option<String>,
+    #[serde(default)]
+    fee_recipient: Option<Address>,
+    #[serde(default)]
+    state_root: Option<String>,
+    #[serde(default)]
+    receipts_root: Option<String>,
+    #[serde(default)]
+    logs_bloom: Option<String>,
+    #[serde(default)]
+    prev_randao: Option<String>,
+    block_number: i64,
+    #[serde(default)]
+    gas_limit: Option<String>,
+    #[serde(default)]
+    gas_used: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    extra_data: Option<String>,
+    #[serde(default)]
+    base_fee_per_gas: Option<String>,
+    #[serde(default)]
+    block_hash: Option<String>,
+    #[serde(default)]
+    transactions: Option<String>,
+    #[serde(default)]
+    withdrawals: Option<String>,
+    #[serde(default)]
+    blob_gas_used: Option<String>,
+    #[serde(default)]
+    excess_blob_gas: Option<String>,
+}
+#[derive(Debug, Deserialize, Serialize)]
+struct Eth1Data {
+    deposit_root: String,
+    deposit_count: String,
+    block_hash: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EventLogRow {
+    pub id: i32,
+    pub topic_key: String,
+    pub bridge_mode: String,
+    pub log_data: serde_json::Value,
+    pub block_number: Option<i64>,
+    pub transaction_hash: Option<String>,
+    pub is_processed: Option<String>,
+}
+
+pub struct MessageProcessor {
+    config: Config,
+    db_pool: PgPool,
+    tokio_sender: Sender<OnChainCallData>,
+}
+
+impl MessageProcessor {
+    pub fn new(config: Config, db_pool: PgPool, tokio_sender: Sender<OnChainCallData>) -> Self {
+        Self {
+            config,
+            db_pool,
+            tokio_sender,
+        }
+    }
+
+    pub async fn start(self) {
+        println!("starting message sender");
+        loop {
+            match self.read_from_db().await {
+                Ok(Some(event_log)) => {
+                    // Received event log data that needs to be processed
+                    println!(
+                        "Processing event log ID: {}, Topic: {}, Bridge Mode: {}",
+                        event_log.id, event_log.topic_key, event_log.bridge_mode
+                    );
+
+                    // Call process_message_or_skip and pass the event log data as function argument
+                    if let Err(e) = self.process_message_or_skip(&event_log).await {
+                        eprintln!("Error in process_message_or_skip: {}", e);
+                    }
+                }
+                Ok(None) => {
+                    // No unprocessed logs found, wait before checking again
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+                Err(e) => {
+                    eprintln!("Error reading database: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
+    async fn process_message_or_skip(
+        &self,
+        event_log: &EventLogRow,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Deserialize the log_data JSON back into a Log object
+        let log: Log = serde_json::from_value(event_log.log_data.clone())?;
+
+        match event_log.bridge_mode.as_str() {
+            "AMB_ETH" => {
+                if let Some(block_num) = event_log.block_number {
+                    if !self
+                        .check_block_finality(block_num, self.config.eth_bc_rpc.clone())
+                        .await?
+                    {
+                        println!("Block {} not finalized yet, skipping", block_num);
+                        return Ok(());
+                    }
+                }
+
+                println!("Processing AMB_ETH...");
+
+                let decoded = AMB_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
+
+                self.tokio_sender
+                    .send(OnChainCallData::AmbEth {
+                        contract_address: self.config.gc_amb_bridge_address,
+                        calldata: AmbEthCalldata {
+                            message: decoded.encodedData.clone(),
+                        },
+                    })
+                    .await?;
+            }
+            "AMB_GC" => {
+                if let Some(block_num) = event_log.block_number {
+                    if !self
+                        .check_block_finality(block_num, self.config.gc_bc_rpc.clone())
+                        .await?
+                    {
+                        println!("Block {} not finalized yet, skipping", block_num);
+                        return Ok(());
+                    }
+                }
+
+                println!("Processing AMB_GC...");
+
+                let decoded = AMB_BRIDGE::UserRequestForSignature::decode_log(&log)?;
+
+                // sign
+                let priv_key_str: String = self.config.amb_validator_private_key.clone().unwrap();
+                let pk_signer: PrivateKeySigner =
+                    priv_key_str.parse().expect("Failed to parse private key");
+
+                let signature = pk_signer
+                    .sign_message(&decoded.encodedData.clone())
+                    .await
+                    .unwrap();
+
+                self.tokio_sender
+                    .send(OnChainCallData::AmbGc {
+                        contract_address: self.config.gc_amb_bridge_address,
+                        calldata: AmbGcCalldata {
+                            message: decoded.encodedData.clone(),
+                            signature: Bytes::copy_from_slice(&signature.as_bytes()),
+                        },
+                    })
+                    .await?;
+            }
+            "XDAI_ETH" => {
+                if let Some(block_num) = event_log.block_number {
+                    if !self
+                        .check_block_finality(block_num, self.config.eth_bc_rpc.clone())
+                        .await?
+                    {
+                        println!("Block {} not finalized yet, skipping", block_num);
+                        return Ok(());
+                    }
+                }
+                println!("Processing XDAI_ETH...");
+
+                let decoded = XDAI_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
+
+                // Call safeExecuteSignaturesWithAutoGasLimit
+                self.tokio_sender
+                    .send(OnChainCallData::XdaiEth {
+                        contract_address: self.config.gc_xdai_bridge_address,
+                        calldata: XdaiEthCalldata {
+                            recipient: decoded.recipient.clone(),
+                            value: decoded.value.clone(),
+                            nonce: decoded.nonce.clone(),
+                        },
+                    })
+                    .await?;
+            }
+            "XDAI_GC" => {
+                if let Some(block_num) = event_log.block_number {
+                    if !self
+                        .check_block_finality(block_num, self.config.gc_bc_rpc.clone())
+                        .await?
+                    {
+                        println!("Block {} not finalized yet, skipping", block_num);
+                        return Ok(());
+                    }
+                }
+                println!("Processing XDAI_GC...");
+
+                let decoded = XDAI_BRIDGE::UserRequestForSignature::decode_log(&log)?;
+                // message: recipient + value + nonce + bridge_address(foreign_xdai_bridge) + token_address(depends)
+                let xdai_message = self.create_xdai_message(
+                    decoded.recipient.clone(),
+                    decoded.value.clone(),
+                    decoded.nonce.clone(),
+                    decoded.token.clone(),
+                );
+
+                // Sign the xdai_message
+                let priv_key_str: String = self.config.xdai_validator_private_key.clone().unwrap();
+
+                let pk_signer: PrivateKeySigner =
+                    priv_key_str.parse().expect("Failed to parse private key");
+
+                // Decode hex string (strip 0x prefix) to bytes for signing
+                let message_bytes =
+                    hex::decode(&xdai_message[2..]).expect("Failed to decode xdai message hex");
+
+                let signature: alloy_primitives::Signature =
+                    pk_signer.sign_message(&message_bytes).await.unwrap();
+                println!("Signature: 0x{}", hex::encode(&signature.as_bytes()));
+
+                // Decode the hex string to actual bytes before sending
+                self.tokio_sender
+                    .send(OnChainCallData::XdaiGc {
+                        contract_address: self.config.gc_xdai_bridge_address,
+                        calldata: XdaiGcCalldata {
+                            message: Bytes::copy_from_slice(&message_bytes),
+                            signature: Bytes::copy_from_slice(&signature.as_bytes()),
+                        },
+                    })
+                    .await?;
+            }
+            _ => {
+                println!("Unknown bridge mode: {}", event_log.bridge_mode);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn check_block_finality(
+        &self,
+        block_number: i64,
+        bc_rpc: String,
+    ) -> Result<bool, Box<dyn Error>> {
+        let last_finalized_block = Self::get_finalized_block(bc_rpc).await?;
+        // Only process finalized block
+        if (block_number
+            >= last_finalized_block
+                .data
+                .message
+                .body
+                .execution_payload
+                .block_number)
+        {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    fn create_xdai_message(
+        &self,
+        recipient: Address,
+        value: U256,
+        nonce: FixedBytes<32>,
+        token_address: Address,
+    ) -> String {
+        // Get bridge address (the foreign bridge contract address)
+        let bridge_address = self.config.eth_xdai_bridge_address;
+
+        // Convert each component to hex string (without 0x prefix)
+        let recipient_hex = hex::encode(recipient.as_slice());
+        assert_eq!(recipient_hex.len(), 40, "Recipient should be 20 bytes");
+
+        // Convert U256 to 32-byte array (big-endian)
+        let value_bytes = value.to_be_bytes::<32>();
+        let value_hex = hex::encode(value_bytes);
+        assert_eq!(value_hex.len(), 64, "Value should be 32 bytes");
+
+        let nonce_hex = hex::encode(nonce.as_slice());
+        assert_eq!(nonce_hex.len(), 64, "Nonce should be 32 bytes");
+
+        let bridge_address_hex = hex::encode(bridge_address.as_slice());
+        assert_eq!(
+            bridge_address_hex.len(),
+            40,
+            "Bridge address should be 20 bytes"
+        );
+
+        let token_address_hex = hex::encode(token_address.as_slice());
+        assert_eq!(
+            token_address_hex.len(),
+            40,
+            "Token address should be 20 bytes"
+        );
+
+        // Concatenate all parts with 0x prefix
+        let message = format!(
+            "0x{}{}{}{}{}",
+            recipient_hex, value_hex, nonce_hex, bridge_address_hex, token_address_hex
+        );
+
+        // Expected length: 2 (0x) + 2 * (20 + 32 + 32 + 20 + 20) = 2 + 248 = 250
+        assert_eq!(
+            message.len(),
+            250,
+            "Message should be 124 bytes (248 hex chars + 0x)"
+        );
+
+        message
+    }
+    async fn read_from_db(&self) -> Result<Option<EventLogRow>, Box<dyn std::error::Error>> {
+        // Read the first row from database where is_processed is 'false'
+        // Set it to 'true' and return the row data
+        // TODO: update read db logic
+
+        // Start a transaction for atomic read and update
+        let mut tx = self.db_pool.begin().await?;
+
+        // Query for the first unprocessed log
+        let row = sqlx::query_as!(
+            EventLogRow,
+            r#"
+            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed
+            FROM event_logs
+            WHERE is_processed = 'false'
+            ORDER BY created_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            "#
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(ref log_row) = row {
+            // Mark this row as processed
+            sqlx::query(
+                r#"
+                UPDATE event_logs
+                SET is_processed = 'true'
+                WHERE id = $1
+                "#,
+            )
+            .bind(log_row.id)
+            .execute(&mut *tx)
+            .await?;
+
+            println!("Marked log {} as processed", log_row.id);
+        }
+
+        // Commit the transaction
+        tx.commit().await?;
+
+        Ok(row)
+    }
+
+    async fn get_finalized_block(bc_rpc: String) -> Result<BeaconBlockResponse, Box<dyn Error>> {
+        // TODO: Client should not be created for every request
+        let endpoint = format!("{}/eth/v1/beacon/blocks/finalized", bc_rpc);
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&endpoint)
+            .header("Accept", "application/json")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("HTTP error: {}", response.status()).into());
+        }
+
+        let block_response = response.json::<BeaconBlockResponse>().await?;
+        Ok(block_response)
+    }
+}
