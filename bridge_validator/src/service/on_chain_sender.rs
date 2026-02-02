@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::error::Error;
 use tokio::sync::mpsc::Receiver;
+use tracing;
 
 pub struct OnChainSender {
     config: Config,
@@ -26,6 +27,7 @@ pub struct EventLogRow {
     pub block_number: Option<i64>,
     pub transaction_hash: Option<String>,
     pub is_processed: Option<String>,
+    pub retry_count: Option<i32>,
 }
 
 impl OnChainSender {
@@ -38,168 +40,166 @@ impl OnChainSender {
     }
 
     pub async fn start(mut self) {
-        println!("On_chain_sender start...");
+        tracing::info!("On_chain_sender start...");
         while let Some(msg) = self.tokio_receiver.recv().await {
-            println!("Received message for on chain call: {:?}", msg);
+            tracing::info!("Received message for on chain call: {:?}", msg);
             if let Err(e) = self.process_message(msg).await {
-                eprintln!("Error processing message: {}", e);
+                tracing::error!("Error processing message: {}", e);
             }
         }
+    }
 
-        async fn process_message(&self, msg: OnChainCallData) -> Result<(), Box<dyn Error>> {
-            match msg {
-                OnChainCallData::AmbEth {
-                    contract_address,
-                    calldata,
-                } => {
-                    println!("=== AmbEth Call Debug ===");
-                    println!("Contract address: {:?}", contract_address);
-                    println!("Message length: {} bytes", calldata.message.len());
-                    println!("Message hex: 0x{}", hex::encode(&calldata.message));
+    async fn process_message(&self, msg: OnChainCallData) -> Result<(), Box<dyn Error>> {
+        match msg {
+            OnChainCallData::AmbEth {
+                contract_address,
+                calldata,
+            } => {
+                tracing::debug!("=== AmbEth Call Debug ===");
+                tracing::debug!("Contract address: {:?}", contract_address);
+                tracing::debug!("Message length: {} bytes", calldata.message.len());
+                tracing::debug!("Message hex: 0x{}", hex::encode(&calldata.message));
 
-                    // Parse the private key string into a PrivateKeySigner
-                    let pk_signer: PrivateKeySigner = self
-                        .config
-                        .clone()
-                        .amb_validator_private_key
-                        .expect("AMB_VALIDATOR_PRIV_KEY must be set in .env")
-                        .parse()
-                        .expect("Failed to parse private key");
+                // Parse the private key string into a PrivateKeySigner
+                let pk_signer: PrivateKeySigner = self
+                    .config
+                    .clone()
+                    .amb_validator_private_key
+                    .expect("AMB_VALIDATOR_PRIV_KEY must be set in .env")
+                    .parse()
+                    .expect("Failed to parse private key");
 
-                    let provider = ProviderBuilder::new()
-                        .wallet(pk_signer)
-                        .connect(&self.config.clone().gc_rpc)
-                        .await?;
+                let provider = ProviderBuilder::new()
+                    .wallet(pk_signer)
+                    .connect(&self.config.clone().gc_rpc)
+                    .await?;
 
-                    let bridge_instance = AMB_BRIDGE::new(contract_address, provider);
-                    let execute_affirmation_tx = bridge_instance
-                        .executeAffirmation(calldata.message)
-                        .send()
-                        .await?;
+                let bridge_instance = AMB_BRIDGE::new(contract_address, provider);
+                let execute_affirmation_tx = bridge_instance
+                    .executeAffirmation(calldata.message)
+                    .send()
+                    .await?;
 
-                    let execute_affirmation_receipt =
-                        execute_affirmation_tx.get_receipt().await.unwrap();
+                let execute_affirmation_receipt =
+                    execute_affirmation_tx.get_receipt().await.unwrap();
 
-                    println!(
-                        "executeAffirmation in block {:?}",
-                        execute_affirmation_receipt
-                    );
-                    Ok(())
-                }
-                OnChainCallData::AmbGc {
-                    contract_address,
-                    calldata,
-                } => {
-                    println!("=== AmbGc Call Debug ===");
-                    println!("Contract address: {:?}", contract_address);
-                    println!("Message length: {} bytes", calldata.message.len());
-                    println!("Message hex: 0x{}", hex::encode(&calldata.message));
-                    println!("Signature length: {} bytes", calldata.signature.len());
-                    println!("Signature hex: 0x{}", hex::encode(&calldata.signature));
+                tracing::info!(
+                    "executeAffirmation in block {:?}",
+                    execute_affirmation_receipt
+                );
+                Ok(())
+            }
+            OnChainCallData::AmbGc {
+                contract_address,
+                calldata,
+            } => {
+                tracing::debug!("=== AmbGc Call Debug ===");
+                tracing::debug!("Contract address: {:?}", contract_address);
+                tracing::debug!("Message length: {} bytes", calldata.message.len());
+                tracing::debug!("Message hex: 0x{}", hex::encode(&calldata.message));
+                tracing::debug!("Signature length: {} bytes", calldata.signature.len());
+                tracing::debug!("Signature hex: 0x{}", hex::encode(&calldata.signature));
 
-                    // Parse the private key string into a PrivateKeySigner
-                    let pk_signer: PrivateKeySigner = self
-                        .config
-                        .clone()
-                        .amb_validator_private_key
-                        .expect("AMB_VALIDATOR_PRIV_KEY must be set in .env")
-                        .parse()
-                        .expect("Failed to parse private key");
+                // Parse the private key string into a PrivateKeySigner
+                let pk_signer: PrivateKeySigner = self
+                    .config
+                    .clone()
+                    .amb_validator_private_key
+                    .expect("AMB_VALIDATOR_PRIV_KEY must be set in .env")
+                    .parse()
+                    .expect("Failed to parse private key");
 
-                    let provider = ProviderBuilder::new()
-                        .wallet(pk_signer)
-                        .connect(&self.config.clone().gc_rpc)
-                        .await?;
+                let provider = ProviderBuilder::new()
+                    .wallet(pk_signer)
+                    .connect(&self.config.clone().gc_rpc)
+                    .await?;
 
-                    let bridge_instance = AMB_BRIDGE::new(contract_address, provider);
-                    let execute_signature_tx = bridge_instance
-                        .submitSignature(calldata.signature, calldata.message)
-                        .send()
-                        .await?;
+                let bridge_instance = AMB_BRIDGE::new(contract_address, provider);
+                let execute_signature_tx = bridge_instance
+                    .submitSignature(calldata.signature, calldata.message)
+                    .send()
+                    .await?;
 
-                    let execute_signature_receipt =
-                        execute_signature_tx.get_receipt().await.unwrap();
+                let execute_signature_receipt = execute_signature_tx.get_receipt().await.unwrap();
 
-                    println!("execute_signature_tx {:?}", execute_signature_receipt);
-                    Ok(())
-                }
-                OnChainCallData::XdaiEth {
-                    contract_address,
-                    calldata,
-                } => {
-                    println!("=== XdaiEth Call Debug ===");
-                    println!("Contract address: {:?}", contract_address);
-                    println!("Recipient: {:?}", calldata.recipient);
-                    println!("Value: {:?}", calldata.value);
-                    println!("Nonce: 0x{}", hex::encode(calldata.nonce));
+                tracing::info!("execute_signature_tx {:?}", execute_signature_receipt);
+                Ok(())
+            }
+            OnChainCallData::XdaiEth {
+                contract_address,
+                calldata,
+            } => {
+                tracing::debug!("=== XdaiEth Call Debug ===");
+                tracing::debug!("Contract address: {:?}", contract_address);
+                tracing::debug!("Recipient: {:?}", calldata.recipient);
+                tracing::debug!("Value: {:?}", calldata.value);
+                tracing::debug!("Nonce: 0x{}", hex::encode(calldata.nonce));
 
-                    // Parse the private key string into a PrivateKeySigner
-                    let pk_signer: PrivateKeySigner = self
-                        .config
-                        .clone()
-                        .xdai_validator_private_key
-                        .expect("XDAI_VALIDATOR_PRIV_KEY must be set in .env")
-                        .parse()
-                        .expect("Failed to parse private key");
+                // Parse the private key string into a PrivateKeySigner
+                let pk_signer: PrivateKeySigner = self
+                    .config
+                    .clone()
+                    .xdai_validator_private_key
+                    .expect("XDAI_VALIDATOR_PRIV_KEY must be set in .env")
+                    .parse()
+                    .expect("Failed to parse private key");
 
-                    let provider = ProviderBuilder::new()
-                        .wallet(pk_signer)
-                        .connect(&self.config.clone().gc_rpc)
-                        .await?;
+                let provider = ProviderBuilder::new()
+                    .wallet(pk_signer)
+                    .connect(&self.config.clone().gc_rpc)
+                    .await?;
 
-                    let bridge_instance = XDAI_BRIDGE::new(contract_address, provider);
-                    let execute_affirmation_tx = bridge_instance
-                        .executeAffirmation(calldata.recipient, calldata.value, calldata.nonce)
-                        .send()
-                        .await?;
+                let bridge_instance = XDAI_BRIDGE::new(contract_address, provider);
+                let execute_affirmation_tx = bridge_instance
+                    .executeAffirmation(calldata.recipient, calldata.value, calldata.nonce)
+                    .send()
+                    .await?;
 
-                    let execute_affirmation_receipt =
-                        execute_affirmation_tx.get_receipt().await.unwrap();
+                let execute_affirmation_receipt =
+                    execute_affirmation_tx.get_receipt().await.unwrap();
 
-                    println!(
-                        "executeAffirmation in block {:?}",
-                        execute_affirmation_receipt
-                    );
+                tracing::info!(
+                    "executeAffirmation in block {:?}",
+                    execute_affirmation_receipt
+                );
 
-                    Ok(())
-                }
-                OnChainCallData::XdaiGc {
-                    contract_address,
-                    calldata,
-                } => {
-                    println!("=== XdaiGc Call Debug ===");
-                    println!("Contract address: {:?}", contract_address);
-                    println!("Message length: {} bytes", calldata.message.len());
-                    println!("Message hex: 0x{}", hex::encode(&calldata.message));
-                    println!("Signature length: {} bytes", calldata.signature.len());
-                    println!("Signature hex: 0x{}", hex::encode(&calldata.signature));
+                Ok(())
+            }
+            OnChainCallData::XdaiGc {
+                contract_address,
+                calldata,
+            } => {
+                tracing::debug!("=== XdaiGc Call Debug ===");
+                tracing::debug!("Contract address: {:?}", contract_address);
+                tracing::debug!("Message length: {} bytes", calldata.message.len());
+                tracing::debug!("Message hex: 0x{}", hex::encode(&calldata.message));
+                tracing::debug!("Signature length: {} bytes", calldata.signature.len());
+                tracing::debug!("Signature hex: 0x{}", hex::encode(&calldata.signature));
 
-                    // Parse the private key string into a PrivateKeySigner
-                    let pk_signer: PrivateKeySigner = self
-                        .config
-                        .clone()
-                        .xdai_validator_private_key
-                        .expect("XDAI_VALIDATOR_PRIV_KEY must be set in .env")
-                        .parse()
-                        .expect("Failed to parse private key");
+                // Parse the private key string into a PrivateKeySigner
+                let pk_signer: PrivateKeySigner = self
+                    .config
+                    .clone()
+                    .xdai_validator_private_key
+                    .expect("XDAI_VALIDATOR_PRIV_KEY must be set in .env")
+                    .parse()
+                    .expect("Failed to parse private key");
 
-                    let provider = ProviderBuilder::new()
-                        .wallet(pk_signer)
-                        .connect(&self.config.clone().gc_rpc)
-                        .await?;
+                let provider = ProviderBuilder::new()
+                    .wallet(pk_signer)
+                    .connect(&self.config.clone().gc_rpc)
+                    .await?;
 
-                    let bridge_instance = XDAI_BRIDGE::new(contract_address, provider);
-                    let execute_signature_tx = bridge_instance
-                        .submitSignature(calldata.signature, calldata.message)
-                        .send()
-                        .await?;
+                let bridge_instance = XDAI_BRIDGE::new(contract_address, provider);
+                let execute_signature_tx = bridge_instance
+                    .submitSignature(calldata.signature, calldata.message)
+                    .send()
+                    .await?;
 
-                    let execute_signature_receipt =
-                        execute_signature_tx.get_receipt().await.unwrap();
+                let execute_signature_receipt = execute_signature_tx.get_receipt().await.unwrap();
 
-                    println!("execute_signature_tx {:?}", execute_signature_receipt);
-                    Ok(())
-                }
+                tracing::info!("execute_signature_tx {:?}", execute_signature_receipt);
+                Ok(())
             }
         }
     }

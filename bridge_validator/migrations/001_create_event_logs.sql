@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS event_logs (
     block_number BIGINT,
     transaction_hash TEXT,
     is_processed TEXT,
+    retry_count INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(topic_key, transaction_hash)
 );

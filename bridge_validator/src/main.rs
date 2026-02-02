@@ -11,9 +11,14 @@ use alloy::providers::ProviderBuilder;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::mpsc::{self};
+use tracing;
+use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+
     dotenv::dotenv().ok();
     let config = Config::from_env()?;
 
@@ -26,12 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&database_url)
         .await?;
 
-    println!("Database connection established");
+    tracing::info!("Database connection established");
 
     // Run migrations automatically
-    println!("Running database migrations...");
+    tracing::info!("Running database migrations...");
     sqlx::migrate!("./migrations").run(&pool).await?;
-    println!("Migrations completed successfully");
+    tracing::info!("Migrations completed successfully");
 
     // Initiating services
     let indexer_eth_amb = EventIndexer::new(
@@ -80,7 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, rx) = mpsc::channel::<OnChainCallData>(32);
 
-    let msg_processor = MessageProcessor::new(config.clone(), pool.clone(), tx.clone());
+    let msg_processor_1 = MessageProcessor::new(config.clone(), pool.clone(), tx.clone());
+    let msg_processor_2 = MessageProcessor::new(config.clone(), pool.clone(), tx.clone());
 
     let on_chain_sender = OnChainSender::new(config.clone(), pool.clone(), rx);
 
@@ -89,7 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         indexer_eth_xdai.start(),
         indexer_gc_amb.start(),
         indexer_gc_xdai.start(),
-        msg_processor.start(),
+        msg_processor_1.start(),
+        msg_processor_2.start(),
         on_chain_sender.start()
     );
 

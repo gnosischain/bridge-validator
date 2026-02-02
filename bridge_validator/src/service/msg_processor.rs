@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use std::error::Error;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{sleep, Duration};
+use tracing;
 
 use crate::contracts::{
     AmbEthCalldata, AmbGcCalldata, OnChainCallData, XdaiEthCalldata, XdaiGcCalldata, AMB_BRIDGE,
@@ -119,6 +120,7 @@ pub struct EventLogRow {
     pub block_number: Option<i64>,
     pub transaction_hash: Option<String>,
     pub is_processed: Option<String>,
+    pub retry_count: Option<i32>,
 }
 
 pub struct MessageProcessor {
@@ -137,19 +139,20 @@ impl MessageProcessor {
     }
 
     pub async fn start(self) {
-        println!("starting message sender");
+        tracing::info!("starting message sender");
+
         loop {
             match self.read_from_db().await {
                 Ok(Some(event_log)) => {
                     // Received event log data that needs to be processed
-                    println!(
+                    tracing::info!(
                         "Processing event log ID: {}, Topic: {}, Bridge Mode: {}",
                         event_log.id, event_log.topic_key, event_log.bridge_mode
                     );
 
                     // Call process_message_or_skip and pass the event log data as function argument
                     if let Err(e) = self.process_message_or_skip(&event_log).await {
-                        eprintln!("Error in process_message_or_skip: {}", e);
+                        tracing::error!("Error in process_message_or_skip: {}", e);
                     }
                 }
                 Ok(None) => {
@@ -157,7 +160,7 @@ impl MessageProcessor {
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
                 Err(e) => {
-                    eprintln!("Error reading database: {}", e);
+                    tracing::error!("Error reading database: {}", e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
             }
@@ -178,12 +181,12 @@ impl MessageProcessor {
                         .check_block_finality(block_num, self.config.eth_bc_rpc.clone())
                         .await?
                     {
-                        println!("Block {} not finalized yet, skipping", block_num);
+                        tracing::info!("Block {} not finalized yet, skipping", block_num);
                         return Ok(());
                     }
                 }
 
-                println!("Processing AMB_ETH...");
+                tracing::info!("Processing AMB_ETH...");
 
                 let decoded = AMB_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
 
@@ -202,12 +205,12 @@ impl MessageProcessor {
                         .check_block_finality(block_num, self.config.gc_bc_rpc.clone())
                         .await?
                     {
-                        println!("Block {} not finalized yet, skipping", block_num);
+                        tracing::info!("Block {} not finalized yet, skipping", block_num);
                         return Ok(());
                     }
                 }
 
-                println!("Processing AMB_GC...");
+                tracing::info!("Processing AMB_GC...");
 
                 let decoded = AMB_BRIDGE::UserRequestForSignature::decode_log(&log)?;
 
@@ -237,11 +240,11 @@ impl MessageProcessor {
                         .check_block_finality(block_num, self.config.eth_bc_rpc.clone())
                         .await?
                     {
-                        println!("Block {} not finalized yet, skipping", block_num);
+                        tracing::info!("Block {} not finalized yet, skipping", block_num);
                         return Ok(());
                     }
                 }
-                println!("Processing XDAI_ETH...");
+                tracing::info!("Processing XDAI_ETH...");
 
                 let decoded = XDAI_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
 
@@ -263,11 +266,11 @@ impl MessageProcessor {
                         .check_block_finality(block_num, self.config.gc_bc_rpc.clone())
                         .await?
                     {
-                        println!("Block {} not finalized yet, skipping", block_num);
+                        tracing::info!("Block {} not finalized yet, skipping", block_num);
                         return Ok(());
                     }
                 }
-                println!("Processing XDAI_GC...");
+                tracing::info!("Processing XDAI_GC...");
 
                 let decoded = XDAI_BRIDGE::UserRequestForSignature::decode_log(&log)?;
                 // message: recipient + value + nonce + bridge_address(foreign_xdai_bridge) + token_address(depends)
@@ -290,7 +293,7 @@ impl MessageProcessor {
 
                 let signature: alloy_primitives::Signature =
                     pk_signer.sign_message(&message_bytes).await.unwrap();
-                println!("Signature: 0x{}", hex::encode(&signature.as_bytes()));
+                tracing::debug!("Signature: 0x{}", hex::encode(&signature.as_bytes()));
 
                 // Decode the hex string to actual bytes before sending
                 self.tokio_sender
@@ -304,7 +307,7 @@ impl MessageProcessor {
                     .await?;
             }
             _ => {
-                println!("Unknown bridge mode: {}", event_log.bridge_mode);
+                tracing::warn!("Unknown bridge mode: {}", event_log.bridge_mode);
             }
         }
 
@@ -390,14 +393,17 @@ impl MessageProcessor {
         // Start a transaction for atomic read and update
         let mut tx = self.db_pool.begin().await?;
 
-        // Query for the first unprocessed log
+        // FOR UPDATE SKIP LOCKED
+        // 1. FOR UPDATE - Locks the selected row(s) within the transaction, preventing other transactions from reading or modifying them
+        // 2. SKIP LOCKED - If a row is already locked by another transaction, skip it and move to the next available row
+        // Query for the first unprocessed log with the smallest block_number
         let row = sqlx::query_as!(
             EventLogRow,
             r#"
-            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed
+            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count
             FROM event_logs
-            WHERE is_processed = 'false'
-            ORDER BY created_at ASC
+            WHERE is_processed = 'false' AND retry_count < 5
+            ORDER BY block_number ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             "#
@@ -418,7 +424,7 @@ impl MessageProcessor {
             .execute(&mut *tx)
             .await?;
 
-            println!("Marked log {} as processed", log_row.id);
+            tracing::info!("Marked log {} as processed", log_row.id);
         }
 
         // Commit the transaction
