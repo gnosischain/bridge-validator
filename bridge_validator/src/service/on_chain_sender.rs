@@ -4,6 +4,8 @@ use crate::contracts::{
     OnChainCallData, AMB_BRIDGE, AMB_BRIDGE_HELPER, XDAI_BRIDGE, XDAI_BRIDGE_HELPER,
 };
 
+use crate::service::msg_processor::SenderData;
+
 use alloy::{
     hex,
     primitives::{keccak256, Address, Bytes, FixedBytes, U256},
@@ -11,7 +13,6 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::error::Error;
 use tokio::sync::mpsc::Receiver;
@@ -20,11 +21,11 @@ use tracing;
 pub struct OnChainSender {
     config: Config,
     db_pool: PgPool,
-    tokio_receiver: Receiver<OnChainCallData>,
+    tokio_receiver: Receiver<SenderData>,
 }
 
 impl OnChainSender {
-    pub fn new(config: Config, db_pool: PgPool, tokio_receiver: Receiver<OnChainCallData>) -> Self {
+    pub fn new(config: Config, db_pool: PgPool, tokio_receiver: Receiver<SenderData>) -> Self {
         Self {
             config,
             db_pool,
@@ -34,14 +35,24 @@ impl OnChainSender {
 
     pub async fn start(mut self) {
         tracing::info!("On_chain_sender start...");
-        while let Some(msg) = self.tokio_receiver.recv().await {
-            tracing::info!("Received message for on chain call: {:?}", msg);
-            if let Err(e) = self.process_message(msg).await {
+        while let Some(sender_data) = self.tokio_receiver.recv().await {
+            tracing::info!(
+                "Received message for on chain call: {:?}",
+                sender_data.on_chain_calldata
+            );
+            if let Err(e) = self
+                .process_message(sender_data.on_chain_calldata, sender_data.event_log_id)
+                .await
+            {
                 tracing::error!("Error processing message: {}", e);
             }
         }
     }
-    async fn process_message(&self, msg: OnChainCallData) -> Result<(), Box<dyn Error>> {
+    async fn process_message(
+        &self,
+        msg: OnChainCallData,
+        event_log_id: i32,
+    ) -> Result<(), Box<dyn Error>> {
         match msg {
             OnChainCallData::AmbEth {
                 contract_address,
@@ -103,21 +114,39 @@ impl OnChainSender {
                     tracing::info!(
                         "AMB_ETH: message already has {signed} >= required {required} affirmations, skipping"
                     );
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                let execute_affirmation_tx = bridge_instance
+                // Execute the affirmation transaction
+                match bridge_instance
                     .executeAffirmation(calldata.message)
                     .send()
-                    .await?;
-
-                let execute_affirmation_receipt =
-                    execute_affirmation_tx.get_receipt().await.unwrap();
-
-                tracing::info!(
-                    "executeAffirmation called in transaction {:?}",
-                    execute_affirmation_receipt.transaction_hash
-                );
+                    .await
+                {
+                    Ok(execute_affirmation_tx) => {
+                        match execute_affirmation_tx.get_receipt().await {
+                            Ok(execute_affirmation_receipt) => {
+                                tracing::info!(
+                                    "executeAffirmation called in transaction {:?}",
+                                    execute_affirmation_receipt.transaction_hash
+                                );
+                                self.delete_event_log(event_log_id).await?;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to get receipt for executeAffirmation: {}",
+                                    e
+                                );
+                                self.increment_retry_count(event_log_id).await?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to send executeAffirmation transaction: {}", e);
+                        self.increment_retry_count(event_log_id).await?;
+                    }
+                }
                 Ok(())
             }
             OnChainCallData::AmbGc {
@@ -166,6 +195,7 @@ impl OnChainSender {
                     tracing::info!(
                         "AMB_GC: message already has {signed} >= required {required} signatures, skipping submitSignature"
                     );
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
@@ -177,20 +207,42 @@ impl OnChainSender {
                         "AMB_GC: validator {} already signed this message, skipping",
                         sender_addr
                     );
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                let submit_signature_tx = bridge_instance
-                    .submitSignature(calldata.signature, calldata.message.clone())
-                    .send()
-                    .await?;
+                // Submit the signature transaction
+                let submit_result = async {
+                    let submit_signature_tx = bridge_instance
+                        .submitSignature(calldata.signature, calldata.message.clone())
+                        .send()
+                        .await
+                        .map_err(|e| -> Box<dyn Error> {
+                            tracing::error!("Failed to send submitSignature transaction: {}", e);
+                            Box::new(e)
+                        })?;
 
-                let submit_signature_receipt = submit_signature_tx.get_receipt().await.unwrap();
+                    let submit_signature_receipt = submit_signature_tx
+                        .get_receipt()
+                        .await
+                        .map_err(|e| -> Box<dyn Error> {
+                            tracing::error!("Failed to get receipt for submitSignature: {}", e);
+                            Box::new(e)
+                        })?;
 
-                tracing::info!(
-                    "submit_signature_tx {:?}",
-                    submit_signature_receipt.transaction_hash
-                );
+                    tracing::info!(
+                        "submit_signature_tx_hash {:?}",
+                        submit_signature_receipt.transaction_hash
+                    );
+                    Ok::<(), Box<dyn Error>>(())
+                }
+                .await;
+
+                // If submit failed, increment retry count and return
+                if submit_result.is_err() {
+                    self.increment_retry_count(event_log_id).await?;
+                    return Ok(());
+                }
 
                 //  call the bridge helper contract to collect aggregated signatures.
                 if self.config.amb_execute_message_on_foreign == "true" {
@@ -203,7 +255,6 @@ impl OnChainSender {
                         .await?;
 
                     if signatures.len() == (2 + 65 * required.to::<usize>() - 1) {
-                        // Create provider for Ethereum (foreign chain)
                         let eth_provider = ProviderBuilder::new()
                             .wallet(pk_signer.clone())
                             .connect(self.config.get_eth_rpc())
@@ -225,7 +276,7 @@ impl OnChainSender {
                             hex::encode(&signatures)
                         );
 
-                        // AMB bridge uses safeExecuteSignaturesWithGasLimit
+                        // AMB uses safeExecuteSignaturesWithGasLimit
                         match foreign_bridge_instance
                             .safeExecuteSignaturesWithAutoGasLimit(
                                 calldata.message.clone(),
@@ -235,12 +286,22 @@ impl OnChainSender {
                             .await
                         {
                             Ok(execute_signature_tx) => {
-                                let execute_signature_receipt =
-                                    execute_signature_tx.get_receipt().await?;
-                                tracing::info!(
-                                    "AMB executeSignatures on foreign chain: {:?}",
-                                    execute_signature_receipt.transaction_hash
-                                );
+                                match execute_signature_tx.get_receipt().await {
+                                    Ok(execute_signature_receipt) => {
+                                        tracing::info!(
+                                            "AMB executeSignatures on foreign chain: {:?}",
+                                            execute_signature_receipt.transaction_hash
+                                        );
+                                        self.delete_event_log(event_log_id).await?;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to get receipt for AMB foreign execution: {}",
+                                            e
+                                        );
+                                        // TODO: reprocess strategy
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -253,10 +314,19 @@ impl OnChainSender {
                                     hex::encode(&calldata.message),
                                     hex::encode(&signatures)
                                 );
-                                // TODO:Push it to the reprocess queue
                             }
                         }
+                    } else {
+                        tracing::warn!(
+                            "Not enough signatures collected yet: {} bytes, expected: {}",
+                            signatures.len(),
+                            2 + 65 * required.to::<usize>() - 1
+                        );
+                        self.delete_event_log(event_log_id).await?;
                     }
+                } else {
+                    // If not executing on foreign chain, delete the event log after submitSignature success
+                    self.delete_event_log(event_log_id).await?;
                 }
 
                 Ok(())
@@ -312,6 +382,8 @@ impl OnChainSender {
                         "XDAI_ETH: affirmation already signed by validator {}, skipping",
                         sender_addr
                     );
+                    // Delete the event log since this validator already signed
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
@@ -327,21 +399,40 @@ impl OnChainSender {
                     tracing::info!(
                         "XDAI_ETH: message already has {signed} >= required {required} affirmations, skipping"
                     );
+                    // Delete the event log since it's already processed
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                let execute_affirmation_tx = bridge_instance
+                // Execute the affirmation transaction
+                match bridge_instance
                     .executeAffirmation(calldata.recipient, calldata.value, calldata.nonce)
                     .send()
-                    .await?;
-
-                let execute_affirmation_receipt =
-                    execute_affirmation_tx.get_receipt().await.unwrap();
-
-                tracing::info!(
-                    "executeAffirmation called in transaction {:?}",
-                    execute_affirmation_receipt.transaction_hash
-                );
+                    .await
+                {
+                    Ok(execute_affirmation_tx) => {
+                        match execute_affirmation_tx.get_receipt().await {
+                            Ok(execute_affirmation_receipt) => {
+                                tracing::info!(
+                                    "executeAffirmation called in transaction {:?}",
+                                    execute_affirmation_receipt.transaction_hash
+                                );
+                                self.delete_event_log(event_log_id).await?;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to get receipt for executeAffirmation: {}",
+                                    e
+                                );
+                                self.increment_retry_count(event_log_id).await?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to send executeAffirmation transaction: {}", e);
+                        self.increment_retry_count(event_log_id).await?;
+                    }
+                }
 
                 Ok(())
             }
@@ -356,7 +447,6 @@ impl OnChainSender {
                 tracing::debug!("Signature length: {} bytes", calldata.signature.len());
                 tracing::debug!("Signature hex: 0x{}", hex::encode(&calldata.signature));
 
-                // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
                     .clone()
@@ -391,6 +481,8 @@ impl OnChainSender {
                     tracing::info!(
                         "XDAI_GC: message already has {signed} >= required {required} signatures, skipping submitSignature"
                     );
+                    // Delete the event log since it's already processed
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
@@ -402,20 +494,42 @@ impl OnChainSender {
                         "XDAI_GC: validator {} already signed this message, skipping",
                         sender_addr
                     );
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                let submit_signature_tx = bridge_instance
-                    .submitSignature(calldata.signature, calldata.message.clone())
-                    .send()
-                    .await?;
+                // Submit the signature transaction
+                let submit_result = async {
+                    let submit_signature_tx = bridge_instance
+                        .submitSignature(calldata.signature, calldata.message.clone())
+                        .send()
+                        .await
+                        .map_err(|e| -> Box<dyn Error> {
+                            tracing::error!("Failed to send submitSignature transaction: {}", e);
+                            Box::new(e)
+                        })?;
 
-                let submit_signature_receipt = submit_signature_tx.get_receipt().await.unwrap();
+                    let submit_signature_receipt = submit_signature_tx
+                        .get_receipt()
+                        .await
+                        .map_err(|e| -> Box<dyn Error> {
+                            tracing::error!("Failed to get receipt for submitSignature: {}", e);
+                            Box::new(e)
+                        })?;
 
-                tracing::info!(
-                    "submit_signature_tx {:?}",
-                    submit_signature_receipt.transaction_hash
-                );
+                    tracing::info!(
+                        "submit_signature_tx_hash {:?}",
+                        submit_signature_receipt.transaction_hash
+                    );
+                    Ok::<(), Box<dyn Error>>(())
+                }
+                .await;
+
+                // If submit failed, increment retry count and return
+                if submit_result.is_err() {
+                    self.increment_retry_count(event_log_id).await?;
+                    return Ok(());
+                }
 
                 // Optionally: inspect aggregated signatures on the helper contract and compute
                 // the message hash using the same layout as `create_xdai_message`.
@@ -441,12 +555,6 @@ impl OnChainSender {
                         .call()
                         .await?;
 
-                    tracing::info!(
-                        "xDai helper returned {} signature bytes for msgHash",
-                        signatures.len()
-                    );
-
-                    tracing::info!("required {:?} ", required.to::<usize>());
                     if signatures.len() == (2 + 65 * required.to::<usize>() - 1) {
                         // Create provider for Ethereum (foreign chain)
                         let eth_provider = ProviderBuilder::new()
@@ -478,12 +586,23 @@ impl OnChainSender {
                             .await
                         {
                             Ok(execute_signature_tx) => {
-                                let execute_signature_receipt =
-                                    execute_signature_tx.get_receipt().await?;
-                                tracing::info!(
-                                    "XDAI executeSignatures on foreign chain: {:?}",
-                                    execute_signature_receipt.transaction_hash
-                                );
+                                match execute_signature_tx.get_receipt().await {
+                                    Ok(execute_signature_receipt) => {
+                                        tracing::info!(
+                                            "XDAI executeSignatures on foreign chain: {:?}",
+                                            execute_signature_receipt.transaction_hash
+                                        );
+                                        // Delete event log after successful foreign execution
+                                        self.delete_event_log(event_log_id).await?;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to get receipt for XDAI foreign execution: {}",
+                                            e
+                                        );
+                                        // TODO: reprocess strategy
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -496,10 +615,19 @@ impl OnChainSender {
                                     hex::encode(&signatures),
                                     hex::encode(&calldata.message)
                                 );
-                                // TODO: push to reprocess queue
                             }
                         }
+                    } else {
+                        tracing::warn!(
+                            "Not enough signatures collected yet: {} bytes, expected: {}",
+                            signatures.len(),
+                            2 + 65 * required.to::<usize>() - 1
+                        );
+                        self.delete_event_log(event_log_id).await?;
                     }
+                } else {
+                    // If not executing on foreign chain, delete the event log after submitSignature success
+                    self.delete_event_log(event_log_id).await?;
                 }
 
                 Ok(())
@@ -541,6 +669,39 @@ impl OnChainSender {
             bridge,
             token,
         })
+    }
+
+    /// Increment retry count for an event log in the database
+    async fn increment_retry_count(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
+        sqlx::query(
+            r#"
+            UPDATE event_logs
+            SET retry_count = retry_count + 1, is_processed = 'false'
+            WHERE id = $1
+            "#,
+        )
+        .bind(event_log_id)
+        .execute(&self.db_pool)
+        .await?;
+
+        tracing::info!("Incremented retry_count for event_log id: {}", event_log_id);
+        Ok(())
+    }
+
+    /// Delete an event log from the database
+    async fn delete_event_log(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
+        sqlx::query(
+            r#"
+            DELETE FROM event_logs
+            WHERE id = $1
+            "#,
+        )
+        .bind(event_log_id)
+        .execute(&self.db_pool)
+        .await?;
+
+        tracing::debug!("Deleted event_log id: {}", event_log_id);
+        Ok(())
     }
 }
 

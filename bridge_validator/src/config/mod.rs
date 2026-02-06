@@ -21,6 +21,7 @@ pub struct Config {
     pub xdai_bridge_helper_address: Address,
     pub amb_bridge_helper_address: Address,
     pub poll_interval_secs: u64,
+    pub max_retry_count: u64,
 }
 
 impl Config {
@@ -132,6 +133,10 @@ impl Config {
                 .map_err(|err| format!("Error parsing AMB_BRIDGE_HELPER_ADDRESS: {}", err))?,
             poll_interval_secs: env::var("POLL_INTERVAL_SECS")
                 .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+            max_retry_count: env::var("MAX_RETRY_COUNT")
+                .unwrap_or_else(|_| "5".to_string())
                 .parse()
                 .unwrap_or(5),
         })

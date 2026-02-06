@@ -117,10 +117,16 @@ impl<P: Provider> EventIndexer<P> {
 
         let logs = self.provider.get_logs(&filter).await?;
         for log in logs.iter() {
-            tracing::info!(
+            tracing::debug!(
                 "[{}-{}] Log found: {log:?}",
                 self.provider_name,
                 self.eventName
+            );
+            tracing::info!(
+                "[{}-{}] Log found in tx: {:?}",
+                self.provider_name,
+                self.eventName,
+                log.transaction_hash
             );
 
             // Extract the event signature (topics[0])
@@ -148,7 +154,7 @@ impl<P: Provider> EventIndexer<P> {
                 .bind("false")
                 .execute(&self.db_pool)
                 .await {
-                    Ok(_) => tracing::info!("[{}-{}] Stored log with topic key: {} ", self.provider_name, self.eventName, topic_key_str),
+                    Ok(_) => tracing::debug!("[{}-{}] Stored log with topic key: {} ", self.provider_name, self.eventName, topic_key_str),
                     Err(e) => tracing::error!("[{}-{}] Failed to store log: {}", self.provider_name, self.eventName, e),
                 }
             } else {

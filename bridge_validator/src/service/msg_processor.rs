@@ -121,14 +121,18 @@ pub struct EventLogRow {
     pub retry_count: Option<i32>,
 }
 
+pub struct SenderData {
+    pub on_chain_calldata: OnChainCallData,
+    pub event_log_id: i32,
+}
 pub struct MessageProcessor {
     config: Config,
     db_pool: PgPool,
-    tokio_sender: Sender<OnChainCallData>,
+    tokio_sender: Sender<SenderData>,
 }
 
 impl MessageProcessor {
-    pub fn new(config: Config, db_pool: PgPool, tokio_sender: Sender<OnChainCallData>) -> Self {
+    pub fn new(config: Config, db_pool: PgPool, tokio_sender: Sender<SenderData>) -> Self {
         Self {
             config,
             db_pool,
@@ -143,11 +147,18 @@ impl MessageProcessor {
             match self.read_from_db().await {
                 Ok(Some(event_log)) => {
                     // Received event log data that needs to be processed
-                    tracing::info!(
-                        "Processing event log ID: {}, Topic: {}, Bridge Mode: {}",
+                    tracing::debug!(
+                        "Processing event log ID: {}, Topic: {}, Bridge Mode: {}, Origin Tx: {:?}",
                         event_log.id,
                         event_log.topic_key,
-                        event_log.bridge_mode
+                        event_log.bridge_mode,
+                        event_log.transaction_hash,
+                    );
+
+                    tracing::debug!(
+                        "Processing event, Bridge Mode: {}, Origin Tx: {:?}",
+                        event_log.bridge_mode,
+                        event_log.transaction_hash,
                     );
 
                     // Call process_message_or_skip and pass the event log data as function argument
@@ -182,20 +193,22 @@ impl MessageProcessor {
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
+                        self.write_is_processed_to_false(event_log.id).await?;
                         return Ok(());
                     }
                 }
 
-                tracing::info!("Processing AMB_ETH...");
-
                 let decoded = AMB_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
 
                 self.tokio_sender
-                    .send(OnChainCallData::AmbEth {
-                        contract_address: self.config.gc_amb_bridge_address,
-                        calldata: AmbEthCalldata {
-                            message: decoded.encodedData.clone(),
+                    .send(SenderData {
+                        on_chain_calldata: OnChainCallData::AmbEth {
+                            contract_address: self.config.gc_amb_bridge_address,
+                            calldata: AmbEthCalldata {
+                                message: decoded.encodedData.clone(),
+                            },
                         },
+                        event_log_id: event_log.id,
                     })
                     .await?;
             }
@@ -206,11 +219,10 @@ impl MessageProcessor {
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
+                        self.write_is_processed_to_false(event_log.id).await?;
                         return Ok(());
                     }
                 }
-
-                tracing::info!("Processing AMB_GC...");
 
                 let decoded = AMB_BRIDGE::UserRequestForSignature::decode_log(&log)?;
 
@@ -225,12 +237,15 @@ impl MessageProcessor {
                     .unwrap();
 
                 self.tokio_sender
-                    .send(OnChainCallData::AmbGc {
-                        contract_address: self.config.gc_amb_bridge_address,
-                        calldata: AmbGcCalldata {
-                            message: decoded.encodedData.clone(),
-                            signature: Bytes::copy_from_slice(&signature.as_bytes()),
+                    .send(SenderData {
+                        on_chain_calldata: OnChainCallData::AmbGc {
+                            contract_address: self.config.gc_amb_bridge_address,
+                            calldata: AmbGcCalldata {
+                                message: decoded.encodedData.clone(),
+                                signature: Bytes::copy_from_slice(&signature.as_bytes()),
+                            },
                         },
+                        event_log_id: event_log.id,
                     })
                     .await?;
             }
@@ -241,22 +256,25 @@ impl MessageProcessor {
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
+                        self.write_is_processed_to_false(event_log.id).await?;
                         return Ok(());
                     }
                 }
-                tracing::info!("Processing XDAI_ETH...");
 
                 let decoded = XDAI_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
 
                 // Call safeExecuteSignaturesWithAutoGasLimit
                 self.tokio_sender
-                    .send(OnChainCallData::XdaiEth {
-                        contract_address: self.config.gc_xdai_bridge_address,
-                        calldata: XdaiEthCalldata {
-                            recipient: decoded.recipient.clone(),
-                            value: decoded.value.clone(),
-                            nonce: decoded.nonce.clone(),
+                    .send(SenderData {
+                        on_chain_calldata: OnChainCallData::XdaiEth {
+                            contract_address: self.config.gc_xdai_bridge_address,
+                            calldata: XdaiEthCalldata {
+                                recipient: decoded.recipient.clone(),
+                                value: decoded.value.clone(),
+                                nonce: decoded.nonce.clone(),
+                            },
                         },
+                        event_log_id: event_log.id,
                     })
                     .await?;
             }
@@ -267,10 +285,10 @@ impl MessageProcessor {
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
+                        self.write_is_processed_to_false(event_log.id).await?;
                         return Ok(());
                     }
                 }
-                tracing::info!("Processing XDAI_GC...");
 
                 let decoded = XDAI_BRIDGE::UserRequestForSignature::decode_log(&log)?;
                 // message: recipient + value + nonce + bridge_address(foreign_xdai_bridge) + token_address(depends)
@@ -297,12 +315,15 @@ impl MessageProcessor {
 
                 // Decode the hex string to actual bytes before sending
                 self.tokio_sender
-                    .send(OnChainCallData::XdaiGc {
-                        contract_address: self.config.gc_xdai_bridge_address,
-                        calldata: XdaiGcCalldata {
-                            message: Bytes::copy_from_slice(&message_bytes),
-                            signature: Bytes::copy_from_slice(&signature.as_bytes()),
+                    .send(SenderData {
+                        on_chain_calldata: OnChainCallData::XdaiGc {
+                            contract_address: self.config.gc_xdai_bridge_address,
+                            calldata: XdaiGcCalldata {
+                                message: Bytes::copy_from_slice(&message_bytes),
+                                signature: Bytes::copy_from_slice(&signature.as_bytes()),
+                            },
                         },
+                        event_log_id: event_log.id,
                     })
                     .await?;
             }
@@ -389,7 +410,6 @@ impl MessageProcessor {
     async fn read_from_db(&self) -> Result<Option<EventLogRow>, Box<dyn std::error::Error>> {
         // Read the first row from database where is_processed is 'false'
         // Set it to 'true' and return the row data
-        // TODO: update read db logic
 
         // Start a transaction for atomic read and update
         let mut tx = self.db_pool.begin().await?;
@@ -426,13 +446,30 @@ impl MessageProcessor {
             .await?;
 
             // TODO: use transaction_hash_src_chain as unique id
-            tracing::info!("Marked log {} as processed", log_row.id);
+            tracing::debug!("Marked log {} as processed", log_row.id);
         }
 
         // Commit the transaction
         tx.commit().await?;
 
         Ok(row)
+    }
+
+    async fn write_is_processed_to_false(&self, id: i32) -> Result<(), Box<dyn Error>> {
+        // write is_processed to false
+        sqlx::query(
+            r#"
+            UPDATE event_logs
+            SET is_processed = 'false'
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .execute(&self.db_pool)
+        .await?;
+
+        tracing::info!("Set is_processed to false for event_log id: {}", id);
+        Ok(())
     }
 
     async fn get_finalized_block(bc_rpc: String) -> Result<BeaconBlockResponse, Box<dyn Error>> {

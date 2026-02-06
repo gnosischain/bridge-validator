@@ -6,19 +6,22 @@ mod service;
 use crate::contracts::OnChainCallData;
 use crate::rpc_provider::setup_provider;
 use crate::service::event_indexer::EventIndexer;
-use crate::service::msg_processor::MessageProcessor;
+use crate::service::msg_processor::{MessageProcessor, SenderData};
 use crate::service::on_chain_sender::OnChainSender;
 
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::mpsc::{self};
 use tracing;
-use tracing_subscriber;
+use tracing_subscriber::{self, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
     dotenv::dotenv().ok();
     let config = Config::from_env()?;
@@ -89,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool.clone(),
     );
 
-    let (tx, rx) = mpsc::channel::<OnChainCallData>(32);
+    let (tx, rx) = mpsc::channel::<SenderData>(32);
 
     let msg_processor_1 = MessageProcessor::new(config.clone(), pool.clone(), tx.clone());
     let msg_processor_2 = MessageProcessor::new(config.clone(), pool.clone(), tx.clone());
