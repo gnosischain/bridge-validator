@@ -96,7 +96,7 @@ impl<P: Provider> EventIndexer<P> {
             self.eventName,
             latest_block
         );
-        if latest_block == last_processed_block {
+        if latest_block <= last_processed_block {
             tracing::debug!(
                 "[{}-{}] Latest block is already processed",
                 self.provider_name,
@@ -104,11 +104,16 @@ impl<P: Provider> EventIndexer<P> {
             );
             return Ok(last_processed_block);
         }
+        let start_block = if last_processed_block == 0 {
+            latest_block // Or config.start_block
+        } else {
+            last_processed_block + 1
+        };
 
         let filter = Filter::new()
             .address(self.contract_address)
             .event(&self.eventName)
-            .from_block(latest_block);
+            .from_block(start_block);
 
         let logs = self.provider.get_logs(&filter).await?;
         for log in logs.iter() {

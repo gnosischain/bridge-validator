@@ -19,8 +19,6 @@ use alloy::{
     hex,
     signers::{local::PrivateKeySigner, Signer},
 };
-use dotenv::dotenv;
-use std::env;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct BeaconBlockResponse {
@@ -147,7 +145,9 @@ impl MessageProcessor {
                     // Received event log data that needs to be processed
                     tracing::info!(
                         "Processing event log ID: {}, Topic: {}, Bridge Mode: {}",
-                        event_log.id, event_log.topic_key, event_log.bridge_mode
+                        event_log.id,
+                        event_log.topic_key,
+                        event_log.bridge_mode
                     );
 
                     // Call process_message_or_skip and pass the event log data as function argument
@@ -178,7 +178,7 @@ impl MessageProcessor {
             "AMB_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.eth_bc_rpc.clone())
+                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string())
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -202,7 +202,7 @@ impl MessageProcessor {
             "AMB_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.gc_bc_rpc.clone())
+                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string())
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -237,7 +237,7 @@ impl MessageProcessor {
             "XDAI_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.eth_bc_rpc.clone())
+                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string())
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -263,7 +263,7 @@ impl MessageProcessor {
             "XDAI_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.gc_bc_rpc.clone())
+                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string())
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -334,6 +334,7 @@ impl MessageProcessor {
             Ok(false)
         }
     }
+
     fn create_xdai_message(
         &self,
         recipient: Address,
@@ -424,6 +425,7 @@ impl MessageProcessor {
             .execute(&mut *tx)
             .await?;
 
+            // TODO: use transaction_hash_src_chain as unique id
             tracing::info!("Marked log {} as processed", log_row.id);
         }
 

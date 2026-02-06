@@ -1,12 +1,13 @@
 mod config;
 mod contracts;
+mod rpc_provider;
 mod service;
 
 use crate::contracts::OnChainCallData;
+use crate::rpc_provider::setup_provider;
 use crate::service::event_indexer::EventIndexer;
 use crate::service::msg_processor::MessageProcessor;
 use crate::service::on_chain_sender::OnChainSender;
-use alloy::providers::ProviderBuilder;
 
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
@@ -27,7 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file");
 
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(10)
+        .test_before_acquire(true)
         .connect(&database_url)
         .await?;
 
@@ -35,15 +37,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run migrations automatically
     tracing::info!("Running database migrations...");
-    sqlx::migrate!("./migrations").run(&pool).await?;
-    tracing::info!("Migrations completed successfully");
+    match sqlx::migrate!("./migrations").run(&pool).await {
+        Ok(_) => tracing::info!("Migrations completed successfully"),
+        Err(e) => {
+            tracing::error!("Migration failed: {:?}", e);
+            return Err(e.into());
+        }
+    }
+    // Verify the table exists
+    let table_check = sqlx::query("SELECT to_regclass('public.event_logs')")
+        .fetch_one(&pool)
+        .await?;
+    tracing::info!("Verified event_logs table exists");
 
+    // Add a small delay to ensure everything is ready
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     // Initiating services
     let indexer_eth_amb = EventIndexer::new(
         config.clone(),
-        ProviderBuilder::new()
-            .connect(&config.clone().eth_rpc)
-            .await?,
+        setup_provider(&config, "eth").await?,
         "ETHAmb".to_string(),
         "UserRequestForAffirmation(bytes32,bytes)".to_string(),
         config.eth_amb_bridge_address,
@@ -52,9 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let indexer_gc_amb = EventIndexer::new(
         config.clone(),
-        ProviderBuilder::new()
-            .connect(&config.clone().gc_rpc)
-            .await?,
+        setup_provider(&config, "gc").await?,
         "GCAmb".to_string(),
         "UserRequestForSignature(bytes32,bytes)".to_string(),
         config.gc_amb_bridge_address,
@@ -63,9 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let indexer_eth_xdai = EventIndexer::new(
         config.clone(),
-        ProviderBuilder::new()
-            .connect(&config.clone().eth_rpc)
-            .await?,
+        setup_provider(&config, "eth").await?,
         "ETHXdai".to_string(),
         "UserRequestForAffirmation(address,uint256,bytes32)".to_string(),
         config.eth_xdai_bridge_address,
@@ -74,9 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let indexer_gc_xdai = EventIndexer::new(
         config.clone(),
-        ProviderBuilder::new()
-            .connect(&config.clone().gc_rpc)
-            .await?,
+        setup_provider(&config, "gc").await?,
         "GCXdai".to_string(),
         "UserRequestForSignature(address,uint256,bytes32,address)".to_string(),
         config.gc_xdai_bridge_address,
