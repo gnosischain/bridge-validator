@@ -8,6 +8,7 @@ mod common;
 
 use alloy::primitives::{address, Address};
 use alloy::rpc::types::Log;
+use alloy::transports::mock::Asserter;
 use common::{
     cleanup_test_db, create_mock_provider, create_test_log_with_address_and_topic, setup_test_db,
     shutdown_test_db,
@@ -459,7 +460,7 @@ async fn test_multiple_events_same_block_different_bridges() {
 
     // Test AMB_ETH indexer
     {
-        let (provider, asserter) = create_mock_provider();
+        let (provider, asserter): (_, Asserter) = create_mock_provider();
 
         // Mock provider responses
         asserter.push_success(&block_number); // get_block_number()
@@ -480,7 +481,7 @@ async fn test_multiple_events_same_block_different_bridges() {
 
     // Test AMB_GC indexer
     {
-        let (provider, asserter) = create_mock_provider();
+        let (provider, asserter): (_, Asserter) = create_mock_provider();
 
         asserter.push_success(&block_number);
         asserter.push_success(&vec![amb_gc_log.clone()]);
@@ -500,7 +501,7 @@ async fn test_multiple_events_same_block_different_bridges() {
 
     // Test XDAI_ETH indexer
     {
-        let (provider, asserter) = create_mock_provider();
+        let (provider, asserter): (_, Asserter) = create_mock_provider();
 
         asserter.push_success(&block_number);
         asserter.push_success(&vec![xdai_eth_log.clone()]);
@@ -643,7 +644,7 @@ async fn test_four_bridge_modes_per_block() {
             let log =
                 create_test_log_with_address_and_topic(*block_number, &tx_hash, address, topic, 0);
 
-            let (provider, asserter) = create_mock_provider();
+            let (provider, asserter): (_, Asserter) = create_mock_provider();
 
             // Mock provider responses
             asserter.push_success(block_number);

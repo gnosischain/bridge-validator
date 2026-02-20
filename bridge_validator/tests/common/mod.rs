@@ -260,3 +260,4 @@ pub async fn cleanup_test_db(pool: &PgPool) {
 }
 
 pub mod mock_provider;
+pub use mock_provider::create_mock_provider;

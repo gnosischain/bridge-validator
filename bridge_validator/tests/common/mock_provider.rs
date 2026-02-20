@@ -7,8 +7,23 @@ use alloy::transports::mock::Asserter;
 /// Returns a tuple of (provider, asserter) where the asserter can be used
 /// to push expected responses
 pub fn create_mock_provider() -> (impl Provider, Asserter) {
-    let asserter = Asserter::new();
-    let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+    let asserter: Asserter = Asserter::new();
+    let provider: alloy::providers::fillers::FillProvider<
+        alloy::providers::fillers::JoinFill<
+            alloy::providers::Identity,
+            alloy::providers::fillers::JoinFill<
+                alloy::providers::fillers::GasFiller,
+                alloy::providers::fillers::JoinFill<
+                    alloy::providers::fillers::BlobGasFiller,
+                    alloy::providers::fillers::JoinFill<
+                        alloy::providers::fillers::NonceFiller,
+                        alloy::providers::fillers::ChainIdFiller,
+                    >,
+                >,
+            >,
+        >,
+        alloy::providers::RootProvider,
+    > = ProviderBuilder::new().connect_mocked_client(asserter.clone());
     (provider, asserter)
 }
 
