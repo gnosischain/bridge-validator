@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::error::Error;
 use tokio::sync::mpsc::Sender;
-use tokio::time::{sleep, Duration};
 use tracing;
 
 use crate::contracts::{
@@ -178,7 +177,7 @@ impl MessageProcessor {
         }
     }
 
-    async fn process_message_or_skip(
+    pub async fn process_message_or_skip(
         &self,
         event_log: &EventLogRow,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -335,20 +334,20 @@ impl MessageProcessor {
         Ok(())
     }
 
-    async fn check_block_finality(
+    pub async fn check_block_finality(
         &self,
         block_number: i64,
         bc_rpc: String,
     ) -> Result<bool, Box<dyn Error>> {
         let last_finalized_block = Self::get_finalized_block(bc_rpc).await?;
         // Only process finalized block
-        if (block_number
-            >= last_finalized_block
+        if block_number
+            <= last_finalized_block
                 .data
                 .message
                 .body
                 .execution_payload
-                .block_number)
+                .block_number
         {
             Ok(true)
         } else {
@@ -356,7 +355,7 @@ impl MessageProcessor {
         }
     }
 
-    fn create_xdai_message(
+    pub fn create_xdai_message(
         &self,
         recipient: Address,
         value: U256,
@@ -407,7 +406,7 @@ impl MessageProcessor {
 
         message
     }
-    async fn read_from_db(&self) -> Result<Option<EventLogRow>, Box<dyn std::error::Error>> {
+    pub async fn read_from_db(&self) -> Result<Option<EventLogRow>, Box<dyn std::error::Error>> {
         // Read the first row from database where is_processed is 'false'
         // Set it to 'true' and return the row data
 
@@ -455,7 +454,7 @@ impl MessageProcessor {
         Ok(row)
     }
 
-    async fn write_is_processed_to_false(&self, id: i32) -> Result<(), Box<dyn Error>> {
+    pub async fn write_is_processed_to_false(&self, id: i32) -> Result<(), Box<dyn Error>> {
         // write is_processed to false
         sqlx::query(
             r#"

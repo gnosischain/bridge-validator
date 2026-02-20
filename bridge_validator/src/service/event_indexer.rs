@@ -66,21 +66,7 @@ impl<P: Provider> EventIndexer<P> {
         }
     }
 
-    fn check_bridge_mode(contract_address: Address, config: &Config) -> String {
-        if (contract_address == config.eth_amb_bridge_address) {
-            "AMB_ETH".to_string()
-        } else if (contract_address == config.gc_amb_bridge_address) {
-            "AMB_GC".to_string()
-        } else if (contract_address == config.eth_xdai_bridge_address) {
-            "XDAI_ETH".to_string()
-        } else if (contract_address == config.gc_xdai_bridge_address) {
-            "XDAI_GC".to_string()
-        } else {
-            "UNKNOWN".to_string()
-        }
-    }
-
-    async fn poll_events(
+    pub async fn poll_events(
         &self,
         last_processed_block: u64,
     ) -> Result<u64, Box<dyn std::error::Error>> {
@@ -105,7 +91,7 @@ impl<P: Provider> EventIndexer<P> {
             return Ok(last_processed_block);
         }
         let start_block = if last_processed_block == 0 {
-            latest_block // Or config.start_block
+            latest_block // TODO: Or config.start_block
         } else {
             last_processed_block + 1
         };
@@ -171,5 +157,23 @@ impl<P: Provider> EventIndexer<P> {
 
         // Return the latest processed block
         Ok(latest_block)
+    }
+}
+
+// Helper function to determine bridge mode from contract address
+// This is outside the Provider-bound impl so it can be tested without a provider
+impl<P> EventIndexer<P> {
+    pub fn check_bridge_mode(contract_address: Address, config: &Config) -> String {
+        if contract_address == config.eth_amb_bridge_address {
+            "AMB_ETH".to_string()
+        } else if contract_address == config.gc_amb_bridge_address {
+            "AMB_GC".to_string()
+        } else if contract_address == config.eth_xdai_bridge_address {
+            "XDAI_ETH".to_string()
+        } else if contract_address == config.gc_xdai_bridge_address {
+            "XDAI_GC".to_string()
+        } else {
+            "UNKNOWN".to_string()
+        }
     }
 }

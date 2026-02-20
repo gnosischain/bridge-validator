@@ -1,8 +1,10 @@
-use alloy::primitives::Address;
-use std::env;
-
 #[cfg(test)]
 mod tests;
+
+use alloy::primitives::Address;
+use alloy_primitives::Log;
+
+use std::env;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -134,7 +136,7 @@ impl Config {
             poll_interval_secs: env::var("POLL_INTERVAL_SECS")
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
-                .unwrap_or(10),
+                .unwrap_or(5),
             max_retry_count: env::var("MAX_RETRY_COUNT")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
