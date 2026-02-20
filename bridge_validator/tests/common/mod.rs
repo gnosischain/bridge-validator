@@ -259,5 +259,27 @@ pub async fn cleanup_test_db(pool: &PgPool) {
         .expect("Failed to cleanup test database");
 }
 
+/// Creates a test configuration for tests without requiring environment variables
+pub fn create_test_config() -> worker::config::Config {
+    worker::config::Config {
+        eth_rpc: vec!["http://localhost:8545".to_string()],
+        gc_rpc: vec!["http://localhost:8546".to_string()],
+        eth_bc_rpc: vec!["http://localhost:8547".to_string()],
+        gc_bc_rpc: vec!["http://localhost:8548".to_string()],
+        xdai_validator_private_key: None,
+        amb_validator_private_key: None,
+        eth_amb_bridge_address: address!("4C36d2919e407f0Cc2Ee3c993ccF8ac26d9CE64e"),
+        gc_amb_bridge_address: address!("75Df5AF045d91108662D8080fD1FEFAd6aA0bb59"),
+        eth_xdai_bridge_address: address!("4aa42145Aa6Ebf72e164C9bBC74fbD3788045016"),
+        gc_xdai_bridge_address: address!("7301CFA0e1756B71869E93d4e4Dca5c7d0eb0AA6"),
+        xdai_execute_message_on_foreign: "false".to_string(),
+        amb_execute_message_on_foreign: "false".to_string(),
+        xdai_bridge_helper_address: address!("e30269bc61E677cD60aD163a221e464B7022fbf5"),
+        amb_bridge_helper_address: address!("7d94ece17e81355326e3359115D4B02411825EdD"),
+        poll_interval_secs: 1,
+        max_retry_count: 5,
+    }
+}
+
 pub mod mock_provider;
 pub use mock_provider::create_mock_provider;

@@ -643,7 +643,7 @@ impl OnChainSender {
     /// - 32 bytes: nonce (bytes32)
     /// - 20 bytes: bridge address
     /// - 20 bytes: token address
-    fn parse_xdai_message(message: &Bytes) -> Result<ParsedXdaiMessage, Box<dyn Error>> {
+    pub fn parse_xdai_message(message: &Bytes) -> Result<ParsedXdaiMessage, Box<dyn Error>> {
         // 20 + 32 + 32 + 20 + 20 = 124 bytes
         if message.len() != 124 {
             return Err(format!("Unexpected xDai message length: {}", message.len()).into());
@@ -672,7 +672,7 @@ impl OnChainSender {
     }
 
     /// Increment retry count for an event log in the database
-    async fn increment_retry_count(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
+    pub async fn increment_retry_count(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
         sqlx::query(
             r#"
             UPDATE event_logs
@@ -689,7 +689,7 @@ impl OnChainSender {
     }
 
     /// Delete an event log from the database
-    async fn delete_event_log(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
+    pub async fn delete_event_log(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
         sqlx::query(
             r#"
             DELETE FROM event_logs
@@ -706,7 +706,7 @@ impl OnChainSender {
 }
 
 #[derive(Debug)]
-struct ParsedXdaiMessage {
+pub struct ParsedXdaiMessage {
     recipient: Address,
     value: U256,
     nonce: FixedBytes<32>,
