@@ -703,7 +703,7 @@ async fn test_check_block_finality_block_is_finalized() {
 
     // Test with block 100 (should be finalized since finalized is 200)
     let is_finalized = processor
-        .check_block_finality(100, mock_server.uri())
+        .check_block_finality(100, mock_server.uri(), &[])
         .await
         .unwrap();
 
@@ -742,7 +742,7 @@ async fn test_check_block_finality_block_is_not_finalized() {
 
     // Test with block 300 (should NOT be finalized since finalized is 200)
     let is_finalized = processor
-        .check_block_finality(300, mock_server.uri())
+        .check_block_finality(300, mock_server.uri(), &[])
         .await
         .unwrap();
 
@@ -830,7 +830,7 @@ async fn test_read_process_write_back_to_false_when_not_finalized() {
 
     // Step 2: Check block finality (should return false because block 100 > finalized block 50)
     let is_finalized = processor
-        .check_block_finality(block_number, mock_server.uri())
+        .check_block_finality(block_number, mock_server.uri(), &[])
         .await
         .unwrap();
     assert!(!is_finalized, "Block should NOT be finalized");
@@ -944,7 +944,7 @@ async fn test_read_stays_processed_when_finalized() {
 
     // Step 2: Check block finality (should return true because block 100 <= finalized block 200)
     let is_finalized = processor
-        .check_block_finality(block_number, mock_server.uri())
+        .check_block_finality(block_number, mock_server.uri(), &[])
         .await
         .unwrap();
     assert!(is_finalized, "Block should be finalized");

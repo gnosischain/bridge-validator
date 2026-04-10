@@ -128,6 +128,7 @@ pub struct MessageProcessor {
     config: Config,
     db_pool: PgPool,
     tokio_sender: Sender<SenderData>,
+    http_client: reqwest::Client,
 }
 
 impl MessageProcessor {
@@ -136,6 +137,7 @@ impl MessageProcessor {
             config,
             db_pool,
             tokio_sender,
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -188,7 +190,7 @@ impl MessageProcessor {
             "AMB_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string())
+                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string(), &self.config.eth_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -214,7 +216,7 @@ impl MessageProcessor {
             "AMB_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string())
+                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string(), &self.config.gc_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -256,7 +258,7 @@ impl MessageProcessor {
             "XDAI_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string())
+                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string(), &self.config.eth_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -285,7 +287,7 @@ impl MessageProcessor {
             "XDAI_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string())
+                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string(), &self.config.gc_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -350,21 +352,10 @@ impl MessageProcessor {
         &self,
         block_number: i64,
         bc_rpc: String,
+        el_rpcs: &[String],
     ) -> Result<bool, Box<dyn Error>> {
-        let last_finalized_block = Self::get_finalized_block(bc_rpc).await?;
-        // Only process finalized block
-        if block_number
-            <= last_finalized_block
-                .data
-                .message
-                .body
-                .execution_payload
-                .block_number
-        {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let finalized_block_number = self.get_finalized_block_number(&bc_rpc, el_rpcs).await?;
+        Ok(block_number <= finalized_block_number)
     }
 
     pub fn create_xdai_message(
@@ -483,22 +474,111 @@ impl MessageProcessor {
         Ok(())
     }
 
-    async fn get_finalized_block(bc_rpc: String) -> Result<BeaconBlockResponse, Box<dyn Error>> {
-        // TODO: Client should not be created for every request
+    async fn get_finalized_block_number(
+        &self,
+        bc_rpc: &str,
+        el_rpcs: &[String],
+    ) -> Result<i64, Box<dyn Error>> {
+        // Try beacon chain RPC first
+        match self.get_finalized_block_from_beacon(bc_rpc).await {
+            Ok(block_number) => return Ok(block_number),
+            Err(e) => {
+                tracing::warn!(
+                    "Beacon chain RPC failed: {}, falling back to EL RPCs",
+                    e
+                );
+            }
+        }
+
+        // Fallback: try EL RPCs with eth_getBlockByNumber
+        for (i, el_rpc) in el_rpcs.iter().enumerate() {
+            tracing::info!(
+                "Trying EL RPC {}/{}: {}",
+                i + 1,
+                el_rpcs.len(),
+                el_rpc
+            );
+            match self.get_finalized_block_from_el(el_rpc).await {
+                Ok(block_number) => {
+                    tracing::info!(
+                        "Last finalized block: {} (from EL RPC {}/{})",
+                        block_number,
+                        i + 1,
+                        el_rpcs.len()
+                    );
+                    return Ok(block_number);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to get finalized block from EL RPC {}/{} ({}): {}",
+                        i + 1,
+                        el_rpcs.len(),
+                        el_rpc,
+                        e
+                    );
+                }
+            }
+        }
+
+        Err("Failed to get finalized block from all RPC endpoints".into())
+    }
+
+    async fn get_finalized_block_from_beacon(
+        &self,
+        bc_rpc: &str,
+    ) -> Result<i64, Box<dyn Error>> {
         let endpoint = format!("{}/eth/v1/beacon/blocks/finalized", bc_rpc);
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .http_client
             .get(&endpoint)
             .header("Accept", "application/json")
             .send()
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("HTTP error: {}", response.status()).into());
+            return Err(format!("Beacon HTTP error: {}", response.status()).into());
         }
 
         let block_response = response.json::<BeaconBlockResponse>().await?;
-        Ok(block_response)
+        Ok(block_response
+            .data
+            .message
+            .body
+            .execution_payload
+            .block_number)
+    }
+
+    async fn get_finalized_block_from_el(
+        &self,
+        el_rpc: &str,
+    ) -> Result<i64, Box<dyn Error>> {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getBlockByNumber",
+            "params": ["finalized", false]
+        });
+
+        let response = self
+            .http_client
+            .post(el_rpc)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("EL HTTP error: {}", response.status()).into());
+        }
+
+        let body: serde_json::Value = response.json().await?;
+
+        let hex_block_number = body["result"]["number"]
+            .as_str()
+            .ok_or("Empty or invalid response from EL RPC")?;
+
+        let block_number =
+            i64::from_str_radix(hex_block_number.trim_start_matches("0x"), 16)?;
+        Ok(block_number)
     }
 }
