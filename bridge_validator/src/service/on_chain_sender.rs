@@ -66,11 +66,11 @@ impl OnChainSender {
                 // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
-                    .clone()
                     .amb_validator_private_key
-                    .expect("AMB_VALIDATOR_PRIV_KEY must be set in .env")
+                    .as_ref()
+                    .ok_or("AMB_VALIDATOR_PRIV_KEY must be set in .env")?
                     .parse()
-                    .expect("Failed to parse private key");
+                    .map_err(|e| format!("Failed to parse AMB private key: {}", e))?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())
@@ -163,11 +163,11 @@ impl OnChainSender {
                 // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
-                    .clone()
                     .amb_validator_private_key
-                    .expect("AMB_VALIDATOR_PRIV_KEY must be set in .env")
+                    .as_ref()
+                    .ok_or("AMB_VALIDATOR_PRIV_KEY must be set in .env")?
                     .parse()
-                    .expect("Failed to parse private key");
+                    .map_err(|e| format!("Failed to parse AMB private key: {}", e))?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())
@@ -344,11 +344,11 @@ impl OnChainSender {
                 // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
-                    .clone()
                     .xdai_validator_private_key
-                    .expect("XDAI_VALIDATOR_PRIV_KEY must be set in .env")
+                    .as_ref()
+                    .ok_or("XDAI_VALIDATOR_PRIV_KEY must be set in .env")?
                     .parse()
-                    .expect("Failed to parse private key");
+                    .map_err(|e| format!("Failed to parse XDAI private key: {}", e))?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())
@@ -449,11 +449,11 @@ impl OnChainSender {
 
                 let pk_signer: PrivateKeySigner = self
                     .config
-                    .clone()
                     .xdai_validator_private_key
-                    .expect("XDAI_VALIDATOR_PRIV_KEY must be set in .env")
+                    .as_ref()
+                    .ok_or("XDAI_VALIDATOR_PRIV_KEY must be set in .env")?
                     .parse()
-                    .expect("Failed to parse private key");
+                    .map_err(|e| format!("Failed to parse XDAI private key: {}", e))?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())

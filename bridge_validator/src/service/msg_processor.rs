@@ -226,14 +226,19 @@ impl MessageProcessor {
                 let decoded = AMB_BRIDGE::UserRequestForSignature::decode_log(&log)?;
 
                 // sign
-                let priv_key_str: String = self.config.amb_validator_private_key.clone().unwrap();
-                let pk_signer: PrivateKeySigner =
-                    priv_key_str.parse().expect("Failed to parse private key");
+                let priv_key_str = self
+                    .config
+                    .amb_validator_private_key
+                    .as_ref()
+                    .ok_or("AMB_VALIDATOR_PRIV_KEY must be set in .env")?;
+                let pk_signer: PrivateKeySigner = priv_key_str
+                    .parse()
+                    .map_err(|e| format!("Failed to parse AMB private key: {}", e))?;
 
                 let signature = pk_signer
                     .sign_message(&decoded.encodedData.clone())
                     .await
-                    .unwrap();
+                    .map_err(|e| format!("Failed to sign AMB message: {}", e))?;
 
                 self.tokio_sender
                     .send(SenderData {
@@ -299,17 +304,24 @@ impl MessageProcessor {
                 );
 
                 // Sign the xdai_message
-                let priv_key_str: String = self.config.xdai_validator_private_key.clone().unwrap();
+                let priv_key_str = self
+                    .config
+                    .xdai_validator_private_key
+                    .as_ref()
+                    .ok_or("XDAI_VALIDATOR_PRIV_KEY must be set in .env")?;
 
-                let pk_signer: PrivateKeySigner =
-                    priv_key_str.parse().expect("Failed to parse private key");
+                let pk_signer: PrivateKeySigner = priv_key_str
+                    .parse()
+                    .map_err(|e| format!("Failed to parse XDAI private key: {}", e))?;
 
                 // Decode hex string (strip 0x prefix) to bytes for signing
-                let message_bytes =
-                    hex::decode(&xdai_message[2..]).expect("Failed to decode xdai message hex");
+                let message_bytes = hex::decode(&xdai_message[2..])
+                    .map_err(|e| format!("Failed to decode xdai message hex: {}", e))?;
 
-                let signature: alloy_primitives::Signature =
-                    pk_signer.sign_message(&message_bytes).await.unwrap();
+                let signature: alloy_primitives::Signature = pk_signer
+                    .sign_message(&message_bytes)
+                    .await
+                    .map_err(|e| format!("Failed to sign XDAI message: {}", e))?;
                 tracing::debug!("Signature: 0x{}", hex::encode(&signature.as_bytes()));
 
                 // Decode the hex string to actual bytes before sending
