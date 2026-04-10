@@ -11,7 +11,7 @@ use alloy::primitives::{address, Address, Bytes, FixedBytes, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use common::setup_test_db;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use wiremock::{
     matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
@@ -106,7 +106,8 @@ async fn test_create_xdai_message_basic() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config.clone(), pool, tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config.clone(), pool, tx, shutdown_rx.clone());
 
     // Test data
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
@@ -142,7 +143,8 @@ async fn test_create_xdai_message_zero_value() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool, tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
 
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
     let value = U256::ZERO;
@@ -168,7 +170,8 @@ async fn test_create_xdai_message_max_value() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool, tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
 
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
     let value = U256::MAX;
@@ -205,7 +208,8 @@ async fn test_create_xdai_message_different_recipients() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool, tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
 
     let recipient1 = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
     let recipient2 = address!("0x1234567890123456789012345678901234567890");
@@ -228,7 +232,8 @@ async fn test_create_xdai_message_message_structure() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config.clone(), pool, tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config.clone(), pool, tx, shutdown_rx.clone());
 
     let recipient = address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let value = U256::from(123456789u64);
@@ -272,7 +277,8 @@ async fn test_create_xdai_message_value_encoding() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool, tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
 
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
     let token_address = address!("0x0000000000000000000000000000000000000000");
@@ -318,7 +324,8 @@ async fn test_create_xdai_message_uses_correct_bridge_address() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config.clone(), pool, tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config.clone(), pool, tx, shutdown_rx.clone());
 
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
     let value = U256::from(1000u64);
@@ -346,7 +353,8 @@ async fn test_read_from_db_no_entries() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool.clone(), tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
 
     // Clean the database to ensure no entries
     sqlx::query("DELETE FROM event_logs")
@@ -366,7 +374,8 @@ async fn test_read_from_db_single_entry() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool.clone(), tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
 
     // Insert a test event log entry with unique tx hash
     let test_log = create_test_log(
@@ -410,7 +419,8 @@ async fn test_read_from_db_multiple_entries_orders_by_block_number() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool.clone(), tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
 
     // Insert multiple test event log entries with different block numbers
     let test_log1 = create_test_log(
@@ -480,7 +490,8 @@ async fn test_read_from_db_skips_high_retry_count() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool.clone(), tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
 
     // Insert entry with retry_count >= 5 (should be skipped)
     let test_log1 = create_test_log(
@@ -544,7 +555,8 @@ async fn test_read_from_db_only_reads_unprocessed() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool.clone(), tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
 
     // Insert a processed entry (should be skipped)
     let test_log1 = create_test_log(
@@ -607,7 +619,8 @@ async fn test_read_from_db_marks_as_processed() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let processor = MessageProcessor::new(config, pool.clone(), tx);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
 
     // Clean the database to ensure no entries
     sqlx::query("DELETE FROM event_logs")
@@ -676,6 +689,7 @@ async fn test_check_block_finality_block_is_finalized() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start wiremock server
     let mock_server = MockServer::start().await;
@@ -699,11 +713,11 @@ async fn test_check_block_finality_block_is_finalized() {
         .mount(&mock_server)
         .await;
 
-    let processor = MessageProcessor::new(config, pool, tx);
+    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
 
     // Test with block 100 (should be finalized since finalized is 200)
     let is_finalized = processor
-        .check_block_finality(100, mock_server.uri(), &[])
+        .check_block_finality(100, Some(&mock_server.uri()), &[])
         .await
         .unwrap();
 
@@ -715,6 +729,7 @@ async fn test_check_block_finality_block_is_not_finalized() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start wiremock server
     let mock_server = MockServer::start().await;
@@ -738,11 +753,11 @@ async fn test_check_block_finality_block_is_not_finalized() {
         .mount(&mock_server)
         .await;
 
-    let processor = MessageProcessor::new(config, pool, tx);
+    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
 
     // Test with block 300 (should NOT be finalized since finalized is 200)
     let is_finalized = processor
-        .check_block_finality(300, mock_server.uri(), &[])
+        .check_block_finality(300, Some(&mock_server.uri()), &[])
         .await
         .unwrap();
 
@@ -754,6 +769,7 @@ async fn test_read_process_write_back_to_false_when_not_finalized() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start wiremock server
     let mock_server = MockServer::start().await;
@@ -778,7 +794,7 @@ async fn test_read_process_write_back_to_false_when_not_finalized() {
         .mount(&mock_server)
         .await;
 
-    let processor = MessageProcessor::new(config.clone(), pool.clone(), tx);
+    let processor = MessageProcessor::new(config.clone(), pool.clone(), tx, shutdown_rx.clone());
 
     // Insert a test entry with block_number 100 (NOT finalized since finalized is 50)
     let test_log = create_test_log(
@@ -830,7 +846,7 @@ async fn test_read_process_write_back_to_false_when_not_finalized() {
 
     // Step 2: Check block finality (should return false because block 100 > finalized block 50)
     let is_finalized = processor
-        .check_block_finality(block_number, mock_server.uri(), &[])
+        .check_block_finality(block_number, Some(&mock_server.uri()), &[])
         .await
         .unwrap();
     assert!(!is_finalized, "Block should NOT be finalized");
@@ -871,6 +887,7 @@ async fn test_read_stays_processed_when_finalized() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start wiremock server
     let mock_server = MockServer::start().await;
@@ -895,7 +912,7 @@ async fn test_read_stays_processed_when_finalized() {
         .mount(&mock_server)
         .await;
 
-    let processor = MessageProcessor::new(config.clone(), pool.clone(), tx);
+    let processor = MessageProcessor::new(config.clone(), pool.clone(), tx, shutdown_rx.clone());
 
     // Insert a test entry with block_number 100 (finalized since finalized is 200)
     let test_log = create_test_log(
@@ -944,7 +961,7 @@ async fn test_read_stays_processed_when_finalized() {
 
     // Step 2: Check block finality (should return true because block 100 <= finalized block 200)
     let is_finalized = processor
-        .check_block_finality(block_number, mock_server.uri(), &[])
+        .check_block_finality(block_number, Some(&mock_server.uri()), &[])
         .await
         .unwrap();
     assert!(is_finalized, "Block should be finalized");
@@ -984,6 +1001,7 @@ async fn test_process_message_amb_eth_finalized_sends_data() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Setup wiremock for finalized block
     let mock_server = MockServer::start().await;
@@ -1009,7 +1027,7 @@ async fn test_process_message_amb_eth_finalized_sends_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx);
+    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
 
     // Create AMB_ETH event log
     let message_id = FixedBytes::<32>::from([1u8; 32]);
@@ -1068,6 +1086,7 @@ async fn test_process_message_amb_eth_not_finalized_writes_false() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Setup wiremock for NOT finalized block
     let mock_server = MockServer::start().await;
@@ -1092,7 +1111,7 @@ async fn test_process_message_amb_eth_not_finalized_writes_false() {
     let mut config_with_mock = config.clone();
     config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx);
+    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
 
     // Insert test entry
     let message_id = FixedBytes::<32>::from([1u8; 32]);
@@ -1179,6 +1198,7 @@ async fn test_process_message_xdai_eth_finalized_sends_data() {
     let config = create_test_config();
     let pool = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Setup wiremock for finalized block
     let mock_server = MockServer::start().await;
@@ -1203,7 +1223,7 @@ async fn test_process_message_xdai_eth_finalized_sends_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx);
+    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
 
     // Create XDAI_ETH event log
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
@@ -1267,6 +1287,7 @@ async fn test_process_message_amb_gc_finalized_sends_signed_data() {
     let config = create_test_config_with_keys();
     let pool = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Setup wiremock for finalized block
     let mock_server = MockServer::start().await;
@@ -1291,7 +1312,7 @@ async fn test_process_message_amb_gc_finalized_sends_signed_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.gc_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx);
+    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
 
     // Create AMB_GC event log (requires signature)
     let message_id = FixedBytes::<32>::from([4u8; 32]);
@@ -1356,6 +1377,7 @@ async fn test_process_message_xdai_gc_finalized_sends_signed_data() {
     let config = create_test_config_with_keys();
     let pool = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Setup wiremock for finalized block
     let mock_server = MockServer::start().await;
@@ -1380,7 +1402,7 @@ async fn test_process_message_xdai_gc_finalized_sends_signed_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.gc_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx);
+    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
 
     // Create XDAI_GC event log (requires signature)
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");

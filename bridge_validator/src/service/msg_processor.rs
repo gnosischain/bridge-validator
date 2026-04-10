@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::error::Error;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 use tracing;
 
 use crate::contracts::{
@@ -129,22 +130,34 @@ pub struct MessageProcessor {
     db_pool: PgPool,
     tokio_sender: Sender<SenderData>,
     http_client: reqwest::Client,
+    shutdown: watch::Receiver<bool>,
 }
 
 impl MessageProcessor {
-    pub fn new(config: Config, db_pool: PgPool, tokio_sender: Sender<SenderData>) -> Self {
+    pub fn new(
+        config: Config,
+        db_pool: PgPool,
+        tokio_sender: Sender<SenderData>,
+        shutdown: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             config,
             db_pool,
             tokio_sender,
             http_client: reqwest::Client::new(),
+            shutdown,
         }
     }
 
-    pub async fn start(self) {
+    pub async fn start(mut self) {
         tracing::info!("starting message sender");
 
         loop {
+            if *self.shutdown.borrow() {
+                tracing::info!("Shutdown signal received, stopping message processor");
+                break;
+            }
+
             match self.read_from_db().await {
                 Ok(Some(event_log)) => {
                     // Received event log data that needs to be processed
@@ -169,11 +182,23 @@ impl MessageProcessor {
                 }
                 Ok(None) => {
                     // No unprocessed logs found, wait before checking again
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
+                        _ = self.shutdown.changed() => {
+                            tracing::info!("Shutdown signal received, stopping message processor");
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Error reading database: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
+                        _ = self.shutdown.changed() => {
+                            tracing::info!("Shutdown signal received, stopping message processor");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -190,7 +215,7 @@ impl MessageProcessor {
             "AMB_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string(), &self.config.eth_rpc)
+                        .check_block_finality(block_num, self.config.get_eth_bc_rpc(), &self.config.eth_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -216,7 +241,7 @@ impl MessageProcessor {
             "AMB_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string(), &self.config.gc_rpc)
+                        .check_block_finality(block_num, self.config.get_gc_bc_rpc(), &self.config.gc_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -258,7 +283,7 @@ impl MessageProcessor {
             "XDAI_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_eth_bc_rpc().to_string(), &self.config.eth_rpc)
+                        .check_block_finality(block_num, self.config.get_eth_bc_rpc(), &self.config.eth_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -287,7 +312,7 @@ impl MessageProcessor {
             "XDAI_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_gc_bc_rpc().to_string(), &self.config.gc_rpc)
+                        .check_block_finality(block_num, self.config.get_gc_bc_rpc(), &self.config.gc_rpc)
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -351,10 +376,10 @@ impl MessageProcessor {
     pub async fn check_block_finality(
         &self,
         block_number: i64,
-        bc_rpc: String,
+        bc_rpc: Option<&str>,
         el_rpcs: &[String],
     ) -> Result<bool, Box<dyn Error>> {
-        let finalized_block_number = self.get_finalized_block_number(&bc_rpc, el_rpcs).await?;
+        let finalized_block_number = self.get_finalized_block_number(bc_rpc, el_rpcs).await?;
         Ok(block_number <= finalized_block_number)
     }
 
@@ -476,17 +501,19 @@ impl MessageProcessor {
 
     async fn get_finalized_block_number(
         &self,
-        bc_rpc: &str,
+        bc_rpc: Option<&str>,
         el_rpcs: &[String],
     ) -> Result<i64, Box<dyn Error>> {
-        // Try beacon chain RPC first
-        match self.get_finalized_block_from_beacon(bc_rpc).await {
-            Ok(block_number) => return Ok(block_number),
-            Err(e) => {
-                tracing::warn!(
-                    "Beacon chain RPC failed: {}, falling back to EL RPCs",
-                    e
-                );
+        // Try beacon chain RPC first, if configured
+        if let Some(bc_rpc) = bc_rpc {
+            match self.get_finalized_block_from_beacon(bc_rpc).await {
+                Ok(block_number) => return Ok(block_number),
+                Err(e) => {
+                    tracing::warn!(
+                        "Beacon chain RPC failed: {}, falling back to EL RPCs",
+                        e
+                    );
+                }
             }
         }
 

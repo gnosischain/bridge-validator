@@ -10,6 +10,7 @@ use alloy::{
     sol_types::SolEvent,
 };
 use sqlx::PgPool;
+use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tracing;
 
@@ -20,6 +21,7 @@ pub struct EventIndexer<P> {
     eventName: String,
     contract_address: Address,
     db_pool: PgPool,
+    shutdown: watch::Receiver<bool>,
 }
 
 impl<P: Provider> EventIndexer<P> {
@@ -30,6 +32,7 @@ impl<P: Provider> EventIndexer<P> {
         eventName: String,
         contract_address: Address,
         db_pool: PgPool,
+        shutdown: watch::Receiver<bool>,
     ) -> Self {
         Self {
             config,
@@ -38,10 +41,11 @@ impl<P: Provider> EventIndexer<P> {
             eventName,
             contract_address,
             db_pool,
+            shutdown,
         }
     }
 
-    pub async fn start(self) {
+    pub async fn start(mut self) {
         tracing::info!(
             "[{}-{}] Starting event listener...",
             self.provider_name,
@@ -62,7 +66,17 @@ impl<P: Provider> EventIndexer<P> {
                     );
                 }
             }
-            sleep(Duration::from_secs(self.config.poll_interval_secs)).await;
+            tokio::select! {
+                _ = sleep(Duration::from_secs(self.config.poll_interval_secs)) => {}
+                _ = self.shutdown.changed() => {
+                    tracing::info!(
+                        "[{}-{}] Shutdown signal received, stopping event indexer",
+                        self.provider_name,
+                        self.eventName
+                    );
+                    break;
+                }
+            }
         }
     }
 

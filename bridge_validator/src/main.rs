@@ -11,7 +11,7 @@ use crate::service::on_chain_sender::OnChainSender;
 
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
-use tokio::sync::mpsc::{self};
+use tokio::sync::{mpsc, watch};
 use tracing;
 use tracing_subscriber::{self, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -55,6 +55,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add a small delay to ensure everything is ready
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    // Shutdown signal: broadcast to all services on SIGTERM/SIGINT
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to create SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown...");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM, initiating graceful shutdown...");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for Ctrl+C");
+            tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+        }
+        let _ = shutdown_tx.send(true);
+    });
+
     // Initiating services
     let indexer_eth_amb = EventIndexer::new(
         config.clone(),
@@ -63,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "UserRequestForAffirmation(bytes32,bytes)".to_string(),
         config.eth_amb_bridge_address,
         pool.clone(),
+        shutdown_rx.clone(),
     );
 
     let indexer_gc_amb = EventIndexer::new(
@@ -72,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "UserRequestForSignature(bytes32,bytes)".to_string(),
         config.gc_amb_bridge_address,
         pool.clone(),
+        shutdown_rx.clone(),
     );
 
     let indexer_eth_xdai = EventIndexer::new(
@@ -81,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "UserRequestForAffirmation(address,uint256,bytes32)".to_string(),
         config.eth_xdai_bridge_address,
         pool.clone(),
+        shutdown_rx.clone(),
     );
 
     let indexer_gc_xdai = EventIndexer::new(
@@ -90,14 +122,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "UserRequestForSignature(address,uint256,bytes32,address)".to_string(),
         config.gc_xdai_bridge_address,
         pool.clone(),
+        shutdown_rx.clone(),
     );
 
     let (tx, rx) = mpsc::channel::<SenderData>(32);
 
-    let msg_processor_1 = MessageProcessor::new(config.clone(), pool.clone(), tx.clone());
-    let msg_processor_2 = MessageProcessor::new(config.clone(), pool.clone(), tx.clone());
+    let msg_processor_1 =
+        MessageProcessor::new(config.clone(), pool.clone(), tx.clone(), shutdown_rx.clone());
+    let msg_processor_2 =
+        MessageProcessor::new(config.clone(), pool.clone(), tx.clone(), shutdown_rx.clone());
 
     let on_chain_sender = OnChainSender::new(config.clone(), pool.clone(), rx);
+
+    // Drop the original sender so the channel closes once both MessageProcessors stop.
+    // OnChainSender will drain remaining messages, then exit.
+    drop(tx);
 
     tokio::join!(
         indexer_eth_amb.start(),
@@ -109,5 +148,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         on_chain_sender.start()
     );
 
+    tracing::info!("All services stopped, shutting down");
     Ok(())
 }
