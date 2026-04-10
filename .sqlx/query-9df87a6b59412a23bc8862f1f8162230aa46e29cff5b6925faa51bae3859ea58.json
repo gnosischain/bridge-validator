@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count, stage\n            FROM event_logs\n            WHERE is_processed = 'false' AND retry_count < 5\n            ORDER BY block_number ASC\n            LIMIT 1\n            FOR UPDATE SKIP LOCKED\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "topic_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "bridge_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "log_data",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "block_number",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "transaction_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_processed",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "retry_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "stage",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "9df87a6b59412a23bc8862f1f8162230aa46e29cff5b6925faa51bae3859ea58"
+}

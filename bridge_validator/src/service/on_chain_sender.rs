@@ -41,7 +41,7 @@ impl OnChainSender {
                 sender_data.on_chain_calldata
             );
             if let Err(e) = self
-                .process_message(sender_data.on_chain_calldata, sender_data.event_log_id)
+                .process_message(sender_data.on_chain_calldata, sender_data.event_log_id, &sender_data.stage)
                 .await
             {
                 tracing::error!("Error processing message: {}", e);
@@ -52,6 +52,7 @@ impl OnChainSender {
         &self,
         msg: OnChainCallData,
         event_log_id: i32,
+        stage: &str,
     ) -> Result<(), Box<dyn Error>> {
         match msg {
             OnChainCallData::AmbEth {
@@ -176,75 +177,89 @@ impl OnChainSender {
 
                 let bridge_instance = AMB_BRIDGE::new(contract_address, provider.clone());
 
-                // bytes32 hashMsg = keccak256(abi.encodePacked(message));
-                let hash_msg = keccak256(&calldata.message);
-
-                // bytes32 hashSender = keccak256(abi.encodePacked(msg.sender, hashMsg));
-                let sender_addr = pk_signer.address();
-                let mut buf = Vec::with_capacity(20 + 32);
-                buf.extend_from_slice(sender_addr.as_slice());
-                buf.extend_from_slice(hash_msg.as_slice());
-                let hash_sender = keccak256(&buf);
-
-                // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
-                let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await?;
-
-                // Check 1: require(!isAlreadyProcessed(signed));
                 let required: U256 = bridge_instance.requiredSignatures().call().await?;
-                if signed >= required {
-                    tracing::info!(
-                        "AMB_GC: message already has {signed} >= required {required} signatures, skipping submitSignature"
-                    );
-                    self.delete_event_log(event_log_id).await?;
-                    return Ok(());
+
+                // Stage "home": run pre-flight checks and submitSignature on home chain
+                if stage != "foreign" {
+                    // bytes32 hashMsg = keccak256(abi.encodePacked(message));
+                    let hash_msg = keccak256(&calldata.message);
+
+                    // bytes32 hashSender = keccak256(abi.encodePacked(msg.sender, hashMsg));
+                    let sender_addr = pk_signer.address();
+                    let mut buf = Vec::with_capacity(20 + 32);
+                    buf.extend_from_slice(sender_addr.as_slice());
+                    buf.extend_from_slice(hash_msg.as_slice());
+                    let hash_sender = keccak256(&buf);
+
+                    // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
+                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await?;
+
+                    // Check 1: require(!isAlreadyProcessed(signed));
+                    if signed >= required {
+                        tracing::info!(
+                            "AMB_GC: message already has {signed} >= required {required} signatures, skipping submitSignature"
+                        );
+                        self.delete_event_log(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    // Check 2: require(!bridge_instance.messagesSigned(hashSender));
+                    let already_signed_by_validator =
+                        bridge_instance.messagesSigned(hash_sender).call().await?;
+                    if already_signed_by_validator {
+                        tracing::info!(
+                            "AMB_GC: validator {} already signed this message, skipping",
+                            sender_addr
+                        );
+                        self.delete_event_log(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    // Submit the signature transaction
+                    let submit_result = async {
+                        let submit_signature_tx = bridge_instance
+                            .submitSignature(calldata.signature, calldata.message.clone())
+                            .send()
+                            .await
+                            .map_err(|e| -> Box<dyn Error> {
+                                tracing::error!("Failed to send submitSignature transaction: {}", e);
+                                Box::new(e)
+                            })?;
+
+                        let submit_signature_receipt = submit_signature_tx
+                            .get_receipt()
+                            .await
+                            .map_err(|e| -> Box<dyn Error> {
+                                tracing::error!("Failed to get receipt for submitSignature: {}", e);
+                                Box::new(e)
+                            })?;
+
+                        tracing::info!(
+                            "submit_signature_tx_hash {:?}",
+                            submit_signature_receipt.transaction_hash
+                        );
+                        Ok::<(), Box<dyn Error>>(())
+                    }
+                    .await;
+
+                    // If submit failed, increment retry count and return
+                    if submit_result.is_err() {
+                        self.increment_retry_count(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    if self.config.amb_execute_message_on_foreign != "true" {
+                        // Not executing on foreign chain, delete after submitSignature success
+                        self.delete_event_log(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    // Mark stage as 'foreign' before attempting foreign execution
+                    self.update_stage(event_log_id, "foreign").await?;
                 }
 
-                // Check 2: require(!bridge_instance.messagesSigned(hashSender));
-                let already_signed_by_validator =
-                    bridge_instance.messagesSigned(hash_sender).call().await?;
-                if already_signed_by_validator {
-                    tracing::info!(
-                        "AMB_GC: validator {} already signed this message, skipping",
-                        sender_addr
-                    );
-                    self.delete_event_log(event_log_id).await?;
-                    return Ok(());
-                }
-
-                // Submit the signature transaction
-                let submit_result = async {
-                    let submit_signature_tx = bridge_instance
-                        .submitSignature(calldata.signature, calldata.message.clone())
-                        .send()
-                        .await
-                        .map_err(|e| -> Box<dyn Error> {
-                            tracing::error!("Failed to send submitSignature transaction: {}", e);
-                            Box::new(e)
-                        })?;
-
-                    let submit_signature_receipt = submit_signature_tx
-                        .get_receipt()
-                        .await
-                        .map_err(|e| -> Box<dyn Error> {
-                            tracing::error!("Failed to get receipt for submitSignature: {}", e);
-                            Box::new(e)
-                        })?;
-
-                    tracing::info!(
-                        "submit_signature_tx_hash {:?}",
-                        submit_signature_receipt.transaction_hash
-                    );
-                    Ok::<(), Box<dyn Error>>(())
-                }
-                .await;
-
-                // If submit failed, increment retry count and return
-                if submit_result.is_err() {
-                    self.increment_retry_count(event_log_id).await?;
-                    return Ok(());
-                }
-
-                //  call the bridge helper contract to collect aggregated signatures.
+                // Stage "foreign": execute on foreign chain
+                // (reached either after fresh submitSignature or on retry with stage='foreign')
                 if self.config.amb_execute_message_on_foreign == "true" {
                     let bridge_helper_instance =
                         AMB_BRIDGE_HELPER::new(self.config.amb_bridge_helper_address, provider);
@@ -299,7 +314,7 @@ impl OnChainSender {
                                             "Failed to get receipt for AMB foreign execution: {}",
                                             e
                                         );
-                                        // TODO: reprocess strategy
+                                        self.increment_retry_count(event_log_id).await?;
                                     }
                                 }
                             }
@@ -314,6 +329,7 @@ impl OnChainSender {
                                     hex::encode(&calldata.message),
                                     hex::encode(&signatures)
                                 );
+                                self.increment_retry_count(event_log_id).await?;
                             }
                         }
                     } else {
@@ -324,9 +340,6 @@ impl OnChainSender {
                         );
                         self.delete_event_log(event_log_id).await?;
                     }
-                } else {
-                    // If not executing on foreign chain, delete the event log after submitSignature success
-                    self.delete_event_log(event_log_id).await?;
                 }
 
                 Ok(())
@@ -462,77 +475,89 @@ impl OnChainSender {
 
                 let bridge_instance = XDAI_BRIDGE::new(contract_address, provider.clone());
 
-                // Reconstruct hashMsg = keccak256(abi.encodePacked(message));
-                let hash_msg = keccak256(&calldata.message);
-
-                // bytes32 hashSender = keccak256(abi.encodePacked(msg.sender, hashMsg));
-                let sender_addr = pk_signer.address();
-                let mut buf = Vec::with_capacity(20 + 32);
-                buf.extend_from_slice(sender_addr.as_slice());
-                buf.extend_from_slice(hash_msg.as_slice());
-                let hash_sender = keccak256(&buf);
-
-                // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
-                let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await?;
-
-                // Check 1: require(!isAlreadyProcessed(signed));
                 let required: U256 = bridge_instance.requiredSignatures().call().await?;
-                if signed >= required {
-                    tracing::info!(
-                        "XDAI_GC: message already has {signed} >= required {required} signatures, skipping submitSignature"
-                    );
-                    // Delete the event log since it's already processed
-                    self.delete_event_log(event_log_id).await?;
-                    return Ok(());
+
+                // Stage "home": run pre-flight checks and submitSignature on home chain
+                if stage != "foreign" {
+                    // Reconstruct hashMsg = keccak256(abi.encodePacked(message));
+                    let hash_msg = keccak256(&calldata.message);
+
+                    // bytes32 hashSender = keccak256(abi.encodePacked(msg.sender, hashMsg));
+                    let sender_addr = pk_signer.address();
+                    let mut buf = Vec::with_capacity(20 + 32);
+                    buf.extend_from_slice(sender_addr.as_slice());
+                    buf.extend_from_slice(hash_msg.as_slice());
+                    let hash_sender = keccak256(&buf);
+
+                    // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
+                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await?;
+
+                    // Check 1: require(!isAlreadyProcessed(signed));
+                    if signed >= required {
+                        tracing::info!(
+                            "XDAI_GC: message already has {signed} >= required {required} signatures, skipping submitSignature"
+                        );
+                        self.delete_event_log(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    // Check 2: require(!bridge_instance.messagesSigned(hashSender));
+                    let already_signed_by_validator =
+                        bridge_instance.messagesSigned(hash_sender).call().await?;
+                    if already_signed_by_validator {
+                        tracing::info!(
+                            "XDAI_GC: validator {} already signed this message, skipping",
+                            sender_addr
+                        );
+                        self.delete_event_log(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    // Submit the signature transaction
+                    let submit_result = async {
+                        let submit_signature_tx = bridge_instance
+                            .submitSignature(calldata.signature, calldata.message.clone())
+                            .send()
+                            .await
+                            .map_err(|e| -> Box<dyn Error> {
+                                tracing::error!("Failed to send submitSignature transaction: {}", e);
+                                Box::new(e)
+                            })?;
+
+                        let submit_signature_receipt = submit_signature_tx
+                            .get_receipt()
+                            .await
+                            .map_err(|e| -> Box<dyn Error> {
+                                tracing::error!("Failed to get receipt for submitSignature: {}", e);
+                                Box::new(e)
+                            })?;
+
+                        tracing::info!(
+                            "submit_signature_tx_hash {:?}",
+                            submit_signature_receipt.transaction_hash
+                        );
+                        Ok::<(), Box<dyn Error>>(())
+                    }
+                    .await;
+
+                    // If submit failed, increment retry count and return
+                    if submit_result.is_err() {
+                        self.increment_retry_count(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    if self.config.xdai_execute_message_on_foreign != "true" {
+                        // Not executing on foreign chain, delete after submitSignature success
+                        self.delete_event_log(event_log_id).await?;
+                        return Ok(());
+                    }
+
+                    // Mark stage as 'foreign' before attempting foreign execution
+                    self.update_stage(event_log_id, "foreign").await?;
                 }
 
-                // Optional Check 2: require(!bridge_instance.messagesSigned(hashSender));
-                let already_signed_by_validator =
-                    bridge_instance.messagesSigned(hash_sender).call().await?;
-                if already_signed_by_validator {
-                    tracing::info!(
-                        "XDAI_GC: validator {} already signed this message, skipping",
-                        sender_addr
-                    );
-                    self.delete_event_log(event_log_id).await?;
-                    return Ok(());
-                }
-
-                // Submit the signature transaction
-                let submit_result = async {
-                    let submit_signature_tx = bridge_instance
-                        .submitSignature(calldata.signature, calldata.message.clone())
-                        .send()
-                        .await
-                        .map_err(|e| -> Box<dyn Error> {
-                            tracing::error!("Failed to send submitSignature transaction: {}", e);
-                            Box::new(e)
-                        })?;
-
-                    let submit_signature_receipt = submit_signature_tx
-                        .get_receipt()
-                        .await
-                        .map_err(|e| -> Box<dyn Error> {
-                            tracing::error!("Failed to get receipt for submitSignature: {}", e);
-                            Box::new(e)
-                        })?;
-
-                    tracing::info!(
-                        "submit_signature_tx_hash {:?}",
-                        submit_signature_receipt.transaction_hash
-                    );
-                    Ok::<(), Box<dyn Error>>(())
-                }
-                .await;
-
-                // If submit failed, increment retry count and return
-                if submit_result.is_err() {
-                    self.increment_retry_count(event_log_id).await?;
-                    return Ok(());
-                }
-
-                // Optionally: inspect aggregated signatures on the helper contract and compute
-                // the message hash using the same layout as `create_xdai_message`.
+                // Stage "foreign": execute on foreign chain
+                // (reached either after fresh submitSignature or on retry with stage='foreign')
                 if self.config.xdai_execute_message_on_foreign == "true" {
                     let bridge_helper_instance =
                         XDAI_BRIDGE_HELPER::new(self.config.xdai_bridge_helper_address, provider);
@@ -578,8 +603,6 @@ impl OnChainSender {
                             hex::encode(&calldata.message)
                         );
 
-                        // Before calling executeSignatures, check if the message is already processed
-                        // by verifying on the foreign bridge
                         match foreign_bridge_instance
                             .executeSignatures(calldata.message.clone(), signatures.clone())
                             .send()
@@ -592,7 +615,6 @@ impl OnChainSender {
                                             "XDAI executeSignatures on foreign chain: {:?}",
                                             execute_signature_receipt.transaction_hash
                                         );
-                                        // Delete event log after successful foreign execution
                                         self.delete_event_log(event_log_id).await?;
                                     }
                                     Err(e) => {
@@ -600,7 +622,7 @@ impl OnChainSender {
                                             "Failed to get receipt for XDAI foreign execution: {}",
                                             e
                                         );
-                                        // TODO: reprocess strategy
+                                        self.increment_retry_count(event_log_id).await?;
                                     }
                                 }
                             }
@@ -615,6 +637,7 @@ impl OnChainSender {
                                     hex::encode(&signatures),
                                     hex::encode(&calldata.message)
                                 );
+                                self.increment_retry_count(event_log_id).await?;
                             }
                         }
                     } else {
@@ -625,9 +648,6 @@ impl OnChainSender {
                         );
                         self.delete_event_log(event_log_id).await?;
                     }
-                } else {
-                    // If not executing on foreign chain, delete the event log after submitSignature success
-                    self.delete_event_log(event_log_id).await?;
                 }
 
                 Ok(())
@@ -669,6 +689,24 @@ impl OnChainSender {
             bridge,
             token,
         })
+    }
+
+    /// Update the processing stage for an event log
+    async fn update_stage(&self, event_log_id: i32, stage: &str) -> Result<(), Box<dyn Error>> {
+        sqlx::query(
+            r#"
+            UPDATE event_logs
+            SET stage = $1
+            WHERE id = $2
+            "#,
+        )
+        .bind(stage)
+        .bind(event_log_id)
+        .execute(&self.db_pool)
+        .await?;
+
+        tracing::info!("Updated stage to '{}' for event_log id: {}", stage, event_log_id);
+        Ok(())
     }
 
     /// Increment retry count for an event log in the database

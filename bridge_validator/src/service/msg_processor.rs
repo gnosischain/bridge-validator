@@ -119,11 +119,13 @@ pub struct EventLogRow {
     pub transaction_hash: Option<String>,
     pub is_processed: Option<String>,
     pub retry_count: Option<i32>,
+    pub stage: Option<String>,
 }
 
 pub struct SenderData {
     pub on_chain_calldata: OnChainCallData,
     pub event_log_id: i32,
+    pub stage: String,
 }
 pub struct MessageProcessor {
     config: Config,
@@ -235,6 +237,7 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
+                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
                     .await?;
             }
@@ -277,6 +280,7 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
+                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
                     .await?;
             }
@@ -306,6 +310,7 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
+                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
                     .await?;
             }
@@ -362,6 +367,7 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
+                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
                     .await?;
             }
@@ -448,7 +454,7 @@ impl MessageProcessor {
         let row = sqlx::query_as!(
             EventLogRow,
             r#"
-            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count
+            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count, stage
             FROM event_logs
             WHERE is_processed = 'false' AND retry_count < 5
             ORDER BY block_number ASC
