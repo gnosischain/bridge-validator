@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bridge
+      POSTGRES_PASSWORD: bridge_password
+      POSTGRES_DB: bridge_validator
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bridge -d bridge_validator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bridge-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: bridge_validator/Dockerfile
+    image: bridge-validator
+    container_name: bridge-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database
+      DATABASE_URL: postgresql://bridge:bridge_password@postgres:5432/bridge_validator
+
+      # RPC Endpoints
+      ETH_RPC: ${ETH_RPC}
+      GC_RPC: ${GC_RPC}
+      ETH_BC_RPC: ${ETH_BC_RPC:-}
+      GC_BC_RPC: ${GC_BC_RPC:-}
+
+      XDAI_VALIDATOR_PRIV_KEY: ${XDAI_VALIDATOR_PRIV_KEY:-}
+      AMB_VALIDATOR_PRIV_KEY: ${AMB_VALIDATOR_PRIV_KEY:-}
+
+      # Bridge Contract Addresses (with defaults from config)
+      ETH_AMB_BRIDGE_ADDRESS: ${ETH_AMB_BRIDGE_ADDRESS:-0x4C36d2919e407f0Cc2Ee3c993ccF8ac26d9CE64e}
+      GC_AMB_BRIDGE_ADDRESS: ${GC_AMB_BRIDGE_ADDRESS:-0x75Df5AF045d91108662D8080fD1FEFAd6aA0bb59}
+      ETH_XDAI_BRIDGE_ADDRESS: ${ETH_XDAI_BRIDGE_ADDRESS:-0x4aa42145Aa6Ebf72e164C9bBC74fbD3788045016}
+      GC_XDAI_BRIDGE_ADDRESS: ${GC_XDAI_BRIDGE_ADDRESS:-0x7301CFA0e1756B71869E93d4e4Dca5c7d0eb0AA6}
+
+      # Poll interval in seconds
+      POLL_INTERVAL_SECS: ${POLL_INTERVAL_SECS:-10}
+      MAX_RETRY_COUNT: ${MAX_RETRY_COUNT:-5}
+      XDAI_EXECUTE_MESSAGE_ON_FOREIGN: ${XDAI_EXECUTE_MESSAGE_ON_FOREIGN:-true} # true if execute message from GC -> ETH
+      AMB_EXECUTE_MESSAGE_ON_FOREIGN: ${AMB_EXECUTE_MESSAGE_ON_FOREIGN:-true}
+
+      # Logging
+      RUST_LOG: ${RUST_LOG:-info}
+    networks:
+      - bridge-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  bridge-network:
+    driver: bridge
