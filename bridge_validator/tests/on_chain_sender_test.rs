@@ -44,7 +44,7 @@ fn test_parse_xdai_message_invalid_length_short() {
 
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("Unexpected xDai message length: 100"),
+        err_msg.contains("unexpected length: 100"),
         "Error message should indicate wrong length, got: {}",
         err_msg
     );
@@ -60,7 +60,7 @@ fn test_parse_xdai_message_invalid_length_long() {
 
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("Unexpected xDai message length: 150"),
+        err_msg.contains("unexpected length: 150"),
         "Error message should indicate wrong length, got: {}",
         err_msg
     );
@@ -104,7 +104,7 @@ mod database_tests {
     #[tokio::test]
     #[ignore] // Methods are private - requires Provider Factory Pattern to test via process_message
     async fn test_increment_retry_count() {
-        let pool = setup_test_db().await;
+        let (pool, _db_lock) = setup_test_db().await;
 
         // Insert test event_log with retry_count = 0
         let result = sqlx::query(
@@ -152,7 +152,7 @@ mod database_tests {
 
     #[tokio::test]
     async fn test_delete_event_log() {
-        let pool = setup_test_db().await;
+        let (pool, _db_lock) = setup_test_db().await;
 
         // Insert test event_log
         let result = sqlx::query(
@@ -207,7 +207,7 @@ mod database_tests {
 
     #[tokio::test]
     async fn test_increment_retry_count_isolation() {
-        let pool = setup_test_db().await;
+        let (pool, _db_lock) = setup_test_db().await;
 
         // Insert two event_logs with different IDs
         let result1 = sqlx::query(
@@ -276,7 +276,7 @@ mod database_tests {
 
     #[tokio::test]
     async fn test_database_operations_with_invalid_id() {
-        let pool = setup_test_db().await;
+        let (pool, _db_lock) = setup_test_db().await;
 
         // Create OnChainSender instance
         let config = create_test_config();
@@ -330,6 +330,7 @@ mod channel_tests {
         let sender_data = SenderData {
             on_chain_calldata: test_calldata,
             event_log_id: 123,
+            stage: "home".to_string(),
         };
 
         // Send test SenderData through channel
@@ -378,6 +379,7 @@ mod channel_tests {
             let sender_data = SenderData {
                 on_chain_calldata: test_calldata,
                 event_log_id: i as i32,
+                stage: "home".to_string(),
             };
 
             tx.send(sender_data)
@@ -411,6 +413,7 @@ mod channel_tests {
             let sender_data = SenderData {
                 on_chain_calldata: test_calldata,
                 event_log_id: i as i32,
+                stage: "home".to_string(),
             };
 
             tx.send(sender_data)
@@ -449,6 +452,7 @@ mod channel_tests {
             let sender_data = SenderData {
                 on_chain_calldata: test_calldata,
                 event_log_id: i as i32,
+                stage: "home".to_string(),
             };
 
             tx.send(sender_data)
@@ -469,6 +473,7 @@ mod channel_tests {
             let sender_data = SenderData {
                 on_chain_calldata: test_calldata,
                 event_log_id: 2,
+                stage: "home".to_string(),
             };
 
             tx_clone.send(sender_data).await
@@ -505,6 +510,7 @@ mod channel_tests {
                     let sender_data = SenderData {
                         on_chain_calldata: test_calldata,
                         event_log_id: (task_id * 10 + i) as i32,
+                        stage: "home".to_string(),
                     };
 
                     tx_clone

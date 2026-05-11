@@ -13,6 +13,7 @@ use common::{
     cleanup_test_db, create_mock_provider, create_test_log_with_address_and_topic, setup_test_db,
     shutdown_test_db,
 };
+use tokio::sync::watch;
 use worker::config::Config;
 use worker::service::event_indexer::EventIndexer;
 
@@ -131,7 +132,7 @@ fn test_check_bridge_mode_all_addresses_are_unique() {
 
 #[tokio::test]
 async fn test_event_indexer_database_setup() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
 
     // Verify the event_logs table exists and has the expected schema
     let result: (i64,) = sqlx::query_as(
@@ -177,7 +178,7 @@ async fn test_event_indexer_database_setup() {
 
 #[tokio::test]
 async fn test_event_indexer_can_store_different_bridge_modes() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let _config = create_test_config();
 
     // Use unique identifiers to avoid conflicts with parallel tests
@@ -231,7 +232,7 @@ async fn test_event_indexer_can_store_different_bridge_modes() {
 
 #[tokio::test]
 async fn test_event_indexer_duplicate_constraint() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let test_id = "dup_test";
 
     let topic_key = format!("0x{}duplicate", test_id);
@@ -300,7 +301,7 @@ async fn test_event_indexer_duplicate_constraint() {
 
 #[tokio::test]
 async fn test_event_indexer_query_by_bridge_mode() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let test_id = "query_mode";
 
     // Insert events for different bridge modes
@@ -357,7 +358,7 @@ async fn test_event_indexer_query_by_bridge_mode() {
 
 #[tokio::test]
 async fn test_event_indexer_query_unprocessed_events() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let test_id = "query_unproc";
 
     // Insert mix of processed and unprocessed events
@@ -421,7 +422,7 @@ async fn test_event_indexer_query_unprocessed_events() {
 /// each event is correctly detected and stored with the appropriate bridge mode
 #[tokio::test]
 async fn test_multiple_events_same_block_different_bridges() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let config = create_test_config();
     let test_id = "multi_same_block";
 
@@ -466,6 +467,7 @@ async fn test_multiple_events_same_block_different_bridges() {
         asserter.push_success(&block_number); // get_block_number()
         asserter.push_success(&vec![amb_eth_log.clone()]); // get_logs()
 
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let indexer = EventIndexer::new(
             config.clone(),
             provider,
@@ -473,6 +475,7 @@ async fn test_multiple_events_same_block_different_bridges() {
             "UserRequestForSignature".to_string(),
             config.eth_amb_bridge_address,
             pool.clone(),
+            shutdown_rx,
         );
 
         let result = indexer.poll_events(0).await;
@@ -486,6 +489,7 @@ async fn test_multiple_events_same_block_different_bridges() {
         asserter.push_success(&block_number);
         asserter.push_success(&vec![amb_gc_log.clone()]);
 
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let indexer = EventIndexer::new(
             config.clone(),
             provider,
@@ -493,6 +497,7 @@ async fn test_multiple_events_same_block_different_bridges() {
             "UserRequestForAffirmation".to_string(),
             config.gc_amb_bridge_address,
             pool.clone(),
+            shutdown_rx,
         );
 
         let result = indexer.poll_events(0).await;
@@ -506,6 +511,7 @@ async fn test_multiple_events_same_block_different_bridges() {
         asserter.push_success(&block_number);
         asserter.push_success(&vec![xdai_eth_log.clone()]);
 
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let indexer = EventIndexer::new(
             config.clone(),
             provider,
@@ -513,6 +519,7 @@ async fn test_multiple_events_same_block_different_bridges() {
             "UserRequestForSignature".to_string(),
             config.eth_xdai_bridge_address,
             pool.clone(),
+            shutdown_rx,
         );
 
         let result = indexer.poll_events(0).await;
@@ -596,7 +603,7 @@ async fn test_multiple_events_same_block_different_bridges() {
 /// and that all events are correctly stored with accurate log data
 #[tokio::test]
 async fn test_four_bridge_modes_per_block() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let config = create_test_config();
     let test_id = "four_modes";
 
@@ -650,6 +657,7 @@ async fn test_four_bridge_modes_per_block() {
             asserter.push_success(block_number);
             asserter.push_success(&vec![log.clone()]);
 
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
             let indexer = EventIndexer::new(
                 config.clone(),
                 provider,
@@ -657,6 +665,7 @@ async fn test_four_bridge_modes_per_block() {
                 "TestEvent".to_string(),
                 address,
                 pool.clone(),
+                shutdown_rx,
             );
 
             let result = indexer.poll_events(0).await;

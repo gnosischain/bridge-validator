@@ -1,9 +1,13 @@
 use alloy::primitives::{address, b256, Address, Bytes, FixedBytes, LogData};
 use alloy::rpc::types::Log;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, Image};
 use tokio::sync::OnceCell;
+
+// Serializes DB-touching tests so they don't trample each other's state
+// (the test_db schema is shared across all tests).
+static DB_LOCK: Mutex<()> = Mutex::new(());
 
 // Custom Postgres image definition for testcontainers 0.23
 #[derive(Debug, Default, Clone)]
@@ -15,7 +19,7 @@ impl Image for PostgresImage {
     }
 
     fn tag(&self) -> &str {
-        "16-alpine"
+        "18-alpine"
     }
 
     fn ready_conditions(&self) -> Vec<WaitFor> {
@@ -163,10 +167,22 @@ pub async fn shutdown_test_db() {
     }
 }
 
-/// Creates a test database pool with migrations applied
-/// Automatically spins up a PostgreSQL container using testcontainers (once for all tests)
-/// The container will be automatically cleaned up when the test process exits
-pub async fn setup_test_db() -> PgPool {
+/// Creates a test database pool with migrations applied.
+///
+/// Returns (pool, guard). The guard serializes DB-touching tests via a
+/// process-wide mutex so the shared `event_logs` table isn't trampled.
+/// Hold the guard for the duration of the test by binding it as `_lock`
+/// (or any non-underscore name); dropping it releases the lock for the
+/// next DB test.
+///
+/// Also wipes `event_logs` before returning, so each test starts clean —
+/// safe to do because the guard prevents concurrent DB tests.
+pub async fn setup_test_db() -> (PgPool, MutexGuard<'static, ()>) {
+    // Acquire the cross-test lock FIRST so we don't race with another
+    // test's setup/teardown. Ignore poisoning — if a prior test panicked,
+    // the DB state is uncertain anyway and the DELETE below cleans up.
+    let guard = DB_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     // Get or initialize the test database
     let test_db = init_test_database().await;
     let database_url = &test_db.database_url;
@@ -193,10 +209,13 @@ pub async fn setup_test_db() -> PgPool {
 
     eprintln!("Migrations completed");
 
-    // Note: We don't delete all data here to allow parallel test execution
-    // Each test should use unique identifiers and clean up its own data
+    // Clean slate per test. Safe under the DB_LOCK held above.
+    sqlx::query("DELETE FROM event_logs")
+        .execute(&pool)
+        .await
+        .expect("Failed to clean event_logs table");
 
-    pool
+    (pool, guard)
 }
 
 /// Creates a mock log for testing

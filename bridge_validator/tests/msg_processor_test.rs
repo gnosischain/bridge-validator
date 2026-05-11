@@ -104,7 +104,7 @@ fn create_test_log(block_number: u64, tx_hash: &str) -> Log {
 #[tokio::test]
 async fn test_create_xdai_message_basic() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config.clone(), pool, tx, shutdown_rx.clone());
@@ -115,7 +115,9 @@ async fn test_create_xdai_message_basic() {
     let nonce = FixedBytes::<32>::from([1u8; 32]);
     let token_address = address!("0x0000000000000000000000000000000000000000");
 
-    let message = processor.create_xdai_message(recipient, value, nonce, token_address);
+    let message = processor
+        .create_xdai_message(recipient, value, nonce, token_address)
+        .unwrap();
 
     // Verify message format
     assert!(message.starts_with("0x"), "Message should start with 0x");
@@ -141,7 +143,7 @@ async fn test_create_xdai_message_basic() {
 #[tokio::test]
 async fn test_create_xdai_message_zero_value() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
@@ -151,7 +153,9 @@ async fn test_create_xdai_message_zero_value() {
     let nonce = FixedBytes::<32>::from([0u8; 32]);
     let token_address = address!("0x0000000000000000000000000000000000000000");
 
-    let message = processor.create_xdai_message(recipient, value, nonce, token_address);
+    let message = processor
+        .create_xdai_message(recipient, value, nonce, token_address)
+        .unwrap();
 
     // Verify message is valid
     assert_eq!(message.len(), 250);
@@ -168,7 +172,7 @@ async fn test_create_xdai_message_zero_value() {
 #[tokio::test]
 async fn test_create_xdai_message_max_value() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
@@ -178,7 +182,9 @@ async fn test_create_xdai_message_max_value() {
     let nonce = FixedBytes::<32>::from([255u8; 32]);
     let token_address = address!("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
 
-    let message = processor.create_xdai_message(recipient, value, nonce, token_address);
+    let message = processor
+        .create_xdai_message(recipient, value, nonce, token_address)
+        .unwrap();
 
     // Verify message is valid
     assert_eq!(message.len(), 250);
@@ -206,7 +212,7 @@ async fn test_create_xdai_message_max_value() {
 #[tokio::test]
 async fn test_create_xdai_message_different_recipients() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
@@ -217,8 +223,12 @@ async fn test_create_xdai_message_different_recipients() {
     let nonce = FixedBytes::<32>::from([1u8; 32]);
     let token_address = address!("0x0000000000000000000000000000000000000000");
 
-    let message1 = processor.create_xdai_message(recipient1, value, nonce, token_address);
-    let message2 = processor.create_xdai_message(recipient2, value, nonce, token_address);
+    let message1 = processor
+        .create_xdai_message(recipient1, value, nonce, token_address)
+        .unwrap();
+    let message2 = processor
+        .create_xdai_message(recipient2, value, nonce, token_address)
+        .unwrap();
 
     // Messages should be different
     assert_ne!(message1, message2);
@@ -230,7 +240,7 @@ async fn test_create_xdai_message_different_recipients() {
 #[tokio::test]
 async fn test_create_xdai_message_message_structure() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config.clone(), pool, tx, shutdown_rx.clone());
@@ -240,7 +250,9 @@ async fn test_create_xdai_message_message_structure() {
     let nonce = FixedBytes::<32>::from([0x42u8; 32]);
     let token_address = address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
-    let message = processor.create_xdai_message(recipient, value, nonce, token_address);
+    let message = processor
+        .create_xdai_message(recipient, value, nonce, token_address)
+        .unwrap();
 
     // Parse the message and verify structure
     // Format: 0x + recipient(20B) + value(32B) + nonce(32B) + bridge(20B) + token(20B)
@@ -275,7 +287,7 @@ async fn test_create_xdai_message_message_structure() {
 #[tokio::test]
 async fn test_create_xdai_message_value_encoding() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
@@ -309,7 +321,9 @@ async fn test_create_xdai_message_value_encoding() {
     ];
 
     for (value, expected_hex) in test_cases {
-        let message = processor.create_xdai_message(recipient, value, nonce, token_address);
+        let message = processor
+        .create_xdai_message(recipient, value, nonce, token_address)
+        .unwrap();
         let value_in_msg = &message[42..106];
         assert_eq!(
             value_in_msg, expected_hex,
@@ -322,7 +336,7 @@ async fn test_create_xdai_message_value_encoding() {
 #[tokio::test]
 async fn test_create_xdai_message_uses_correct_bridge_address() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config.clone(), pool, tx, shutdown_rx.clone());
@@ -332,7 +346,9 @@ async fn test_create_xdai_message_uses_correct_bridge_address() {
     let nonce = FixedBytes::<32>::from([1u8; 32]);
     let token_address = address!("0x0000000000000000000000000000000000000000");
 
-    let message = processor.create_xdai_message(recipient, value, nonce, token_address);
+    let message = processor
+        .create_xdai_message(recipient, value, nonce, token_address)
+        .unwrap();
 
     // Extract bridge address from message
     let bridge_in_msg = &message[170..210];
@@ -351,7 +367,7 @@ async fn test_create_xdai_message_uses_correct_bridge_address() {
 #[tokio::test]
 async fn test_read_from_db_no_entries() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
@@ -372,7 +388,7 @@ async fn test_read_from_db_no_entries() {
 #[tokio::test]
 async fn test_read_from_db_single_entry() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
@@ -417,7 +433,7 @@ async fn test_read_from_db_single_entry() {
 #[tokio::test]
 async fn test_read_from_db_multiple_entries_orders_by_block_number() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
@@ -488,7 +504,7 @@ async fn test_read_from_db_multiple_entries_orders_by_block_number() {
 #[tokio::test]
 async fn test_read_from_db_skips_high_retry_count() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
@@ -553,7 +569,7 @@ async fn test_read_from_db_skips_high_retry_count() {
 #[tokio::test]
 async fn test_read_from_db_only_reads_unprocessed() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
@@ -617,7 +633,7 @@ async fn test_read_from_db_only_reads_unprocessed() {
 #[tokio::test]
 async fn test_read_from_db_marks_as_processed() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = MessageProcessor::new(config, pool.clone(), tx, shutdown_rx.clone());
@@ -687,7 +703,7 @@ async fn test_read_from_db_marks_as_processed() {
 #[tokio::test]
 async fn test_check_block_finality_block_is_finalized() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -727,7 +743,7 @@ async fn test_check_block_finality_block_is_finalized() {
 #[tokio::test]
 async fn test_check_block_finality_block_is_not_finalized() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -767,7 +783,7 @@ async fn test_check_block_finality_block_is_not_finalized() {
 #[tokio::test]
 async fn test_read_process_write_back_to_false_when_not_finalized() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -885,7 +901,7 @@ async fn test_read_process_write_back_to_false_when_not_finalized() {
 #[tokio::test]
 async fn test_read_stays_processed_when_finalized() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, _rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -999,7 +1015,7 @@ async fn test_read_stays_processed_when_finalized() {
 #[tokio::test]
 async fn test_process_message_amb_eth_finalized_sends_data() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1060,6 +1076,7 @@ async fn test_process_message_amb_eth_finalized_sends_data() {
         transaction_hash: Some("0x1234".to_string()),
         is_processed: Some("false".to_string()),
         retry_count: Some(0),
+        stage: None,
     };
 
     // Process the message
@@ -1084,7 +1101,7 @@ async fn test_process_message_amb_eth_finalized_sends_data() {
 #[tokio::test]
 async fn test_process_message_amb_eth_not_finalized_writes_false() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1166,6 +1183,7 @@ async fn test_process_message_amb_eth_not_finalized_writes_false() {
         ),
         is_processed: Some("true".to_string()),
         retry_count: Some(0),
+        stage: None,
     };
 
     // Process the message (should skip and write false)
@@ -1196,7 +1214,7 @@ async fn test_process_message_amb_eth_not_finalized_writes_false() {
 #[tokio::test]
 async fn test_process_message_xdai_eth_finalized_sends_data() {
     let config = create_test_config();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1259,6 +1277,7 @@ async fn test_process_message_xdai_eth_finalized_sends_data() {
         transaction_hash: Some("0x2234".to_string()),
         is_processed: Some("false".to_string()),
         retry_count: Some(0),
+        stage: None,
     };
 
     // Process the message
@@ -1285,7 +1304,7 @@ async fn test_process_message_xdai_eth_finalized_sends_data() {
 #[tokio::test]
 async fn test_process_message_amb_gc_finalized_sends_signed_data() {
     let config = create_test_config_with_keys();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1345,6 +1364,7 @@ async fn test_process_message_amb_gc_finalized_sends_signed_data() {
         transaction_hash: Some("0x3234".to_string()),
         is_processed: Some("false".to_string()),
         retry_count: Some(0),
+        stage: None,
     };
 
     // Process the message
@@ -1375,7 +1395,7 @@ async fn test_process_message_amb_gc_finalized_sends_signed_data() {
 #[tokio::test]
 async fn test_process_message_xdai_gc_finalized_sends_signed_data() {
     let config = create_test_config_with_keys();
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -1440,6 +1460,7 @@ async fn test_process_message_xdai_gc_finalized_sends_signed_data() {
         transaction_hash: Some("0x4234".to_string()),
         is_processed: Some("false".to_string()),
         retry_count: Some(0),
+        stage: None,
     };
 
     // Process the message

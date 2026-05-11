@@ -10,7 +10,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn test_insert_and_retrieve_event_log() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
 
     // Insert a test event log
     let topic_key = "0xtest123456";
@@ -60,7 +60,7 @@ async fn test_insert_and_retrieve_event_log() {
 
 #[tokio::test]
 async fn test_duplicate_event_log_prevention() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
 
     let topic_key = "0xduplicate_test";
     let tx_hash = "0xtxhash_dup";
@@ -123,7 +123,7 @@ async fn test_duplicate_event_log_prevention() {
 
 #[tokio::test]
 async fn test_concurrent_message_processing_with_skip_locked() {
-    let pool = setup_test_db().await;
+    let (pool, _db_lock) = setup_test_db().await;
 
     // Insert 5 test logs
     for i in 0..5 {

@@ -1,6 +1,14 @@
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
+
+    // Serializes tests that mutate process-global env vars to prevent races.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn test_parse_single_rpc_url() {
         let result = Config::parse_rpc_urls("https://eth.example.com".to_string());
@@ -52,6 +60,7 @@ mod tests {
 
     #[test]
     fn test_config_default_poll_interval() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
@@ -72,6 +81,7 @@ mod tests {
 
     #[test]
     fn test_config_multiple_rpc_endpoints() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
@@ -94,6 +104,7 @@ mod tests {
 
     #[test]
     fn test_config_custom_poll_interval() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
@@ -114,6 +125,7 @@ mod tests {
 
     #[test]
     fn test_config_invalid_poll_interval_uses_default() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
@@ -135,6 +147,7 @@ mod tests {
 
     #[test]
     fn test_config_default_bridge_addresses() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
@@ -165,6 +178,7 @@ mod tests {
 
     #[test]
     fn test_config_missing_required_rpc() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("ETH_RPC");
         std::env::remove_var("POLL_INTERVAL_SECS");
@@ -181,6 +195,7 @@ mod tests {
 
     #[test]
     fn test_config_optional_private_keys() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
@@ -201,6 +216,7 @@ mod tests {
 
     #[test]
     fn test_config_empty_rpc_urls() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
@@ -219,6 +235,7 @@ mod tests {
 
     #[test]
     fn test_config_only_commas() {
+        let _lock = env_lock();
         // Clear environment to ensure test isolation
         std::env::remove_var("POLL_INTERVAL_SECS");
         std::env::remove_var("MAX_RETRY_COUNT");
