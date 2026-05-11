@@ -27,6 +27,7 @@ jobs:
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/test_db
+      SQLX_OFFLINE: true
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
 
