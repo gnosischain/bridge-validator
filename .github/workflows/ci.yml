@@ -1,0 +1,138 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Minimum permissions for the GITHUB_TOKEN. Shrinks blast radius if a
+# dependency (build script, proc macro, dev-dep) is compromised.
+permissions:
+  contents: read
+
+# Cancel superseded PR runs; preserve every main-branch build for history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fast smoke check: migrations apply cleanly AND .sqlx offline data matches
+  # the live queries. Catches the "Dockerfile build
+  migrations-and-sqlx:
+    name: migrations & sqlx prepare check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sqlx_check
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/sqlx_check
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          key: migrations
+
+      - uses: taiki-e/install-action@fa0dd4cd0a40696e6f9766370614a5ce482e6aa8 # v2.77.5
+        with:
+          tool: sqlx-cli
+
+      - name: Apply migrations + verify .sqlx offline data is in sync
+        run: make ci-sqlx
+
+  # Test suite. Uses testcontainers exclusively (each test spins up its own
+  # ephemeral Postgres via the Docker socket available on GitHub runners).
+  # No `services:` block — mixing service Postgres with testcontainers Postgres
+  # caused two different schema states to coexist in CI.
+  test:
+    name: cargo nextest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      SQLX_OFFLINE: true
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          key: test
+
+      - uses: taiki-e/install-action@fa0dd4cd0a40696e6f9766370614a5ce482e6aa8 # v2.77.5
+        with:
+          tool: cargo-nextest
+
+      - name: Run tests
+        run: make ci-test
+
+  # Sanity check: the exact binary prod ships (release profile) must compile.
+  # Runs inside the same base image the Dockerfile builder uses, so the
+  # toolchain, OS, and system libs match production exactly.
+  release-build:
+    name: release build (prod artifact)
+    runs-on: ubuntu-latest
+    container: rust:slim-bookworm
+    timeout-minutes: 20
+
+    env:
+      SQLX_OFFLINE: true
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build deps (mirrors Dockerfile)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends pkg-config libssl-dev make
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          key: release
+
+      - name: Build release binary
+        run: make ci-build
+
+  # End-to-end Dockerfile check. Catches breakage no cargo command would see:
+  # renamed paths, missing .sqlx, base-image issues, missing runtime libs.
+  docker-build:
+    name: docker build (prod image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Build prod image
+        run: make ci-docker
