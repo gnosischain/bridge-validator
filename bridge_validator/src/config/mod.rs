@@ -48,14 +48,14 @@ impl Config {
         &self.gc_rpc[0]
     }
 
-    /// Get the primary ETH Beacon Chain RPC URL (first in the list)
-    pub fn get_eth_bc_rpc(&self) -> &str {
-        &self.eth_bc_rpc[0]
+    /// Get the primary ETH Beacon Chain RPC URL (first in the list), if set
+    pub fn get_eth_bc_rpc(&self) -> Option<&str> {
+        self.eth_bc_rpc.first().map(|s| s.as_str())
     }
 
-    /// Get the primary GC Beacon Chain RPC URL (first in the list)
-    pub fn get_gc_bc_rpc(&self) -> &str {
-        &self.gc_bc_rpc[0]
+    /// Get the primary GC Beacon Chain RPC URL (first in the list), if set
+    pub fn get_gc_bc_rpc(&self) -> Option<&str> {
+        self.gc_bc_rpc.first().map(|s| s.as_str())
     }
 
     pub fn from_env() -> Result<Self, String> {
@@ -65,12 +65,10 @@ impl Config {
         let gc_rpc: Vec<String> = Self::parse_rpc_urls(
             env::var("GC_RPC").map_err(|err| format!("Error reading GC_RPC: {}", err))?,
         );
-        let eth_bc_rpc: Vec<String> = Self::parse_rpc_urls(
-            env::var("ETH_BC_RPC").map_err(|err| format!("Error reading ETH_BC_RPC: {}", err))?,
-        );
-        let gc_bc_rpc: Vec<String> = Self::parse_rpc_urls(
-            env::var("GC_BC_RPC").map_err(|err| format!("Error reading GC_BC_RPC: {}", err))?,
-        );
+        let eth_bc_rpc: Vec<String> =
+            env::var("ETH_BC_RPC").map(Self::parse_rpc_urls).unwrap_or_default();
+        let gc_bc_rpc: Vec<String> =
+            env::var("GC_BC_RPC").map(Self::parse_rpc_urls).unwrap_or_default();
 
         // Validate that at least one RPC URL is provided for each
         if eth_rpc.is_empty() {
@@ -79,11 +77,12 @@ impl Config {
         if gc_rpc.is_empty() {
             return Err("GC_RPC must contain at least one valid URL".to_string());
         }
+
         if eth_bc_rpc.is_empty() {
-            return Err("ETH_BC_RPC must contain at least one valid URL".to_string());
+            tracing::warn!("ETH_BC_RPC not set, will use ETH_RPC for finality checks");
         }
         if gc_bc_rpc.is_empty() {
-            return Err("GC_BC_RPC must contain at least one valid URL".to_string());
+            tracing::warn!("GC_BC_RPC not set, will use GC_RPC for finality checks");
         }
 
         Ok(Config {

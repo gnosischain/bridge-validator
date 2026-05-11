@@ -1,9 +1,11 @@
 mod config;
 mod contracts;
+mod error;
 mod rpc_provider;
 mod service;
 
 use crate::contracts::OnChainCallData;
+use crate::error::BridgeValidatorError;
 use crate::rpc_provider::setup_provider;
 use crate::service::event_indexer::EventIndexer;
 use crate::service::msg_processor::{MessageProcessor, SenderData};
@@ -16,7 +18,7 @@ use tracing;
 use tracing_subscriber::{self, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), BridgeValidatorError> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
@@ -24,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     dotenv::dotenv().ok();
-    let config = Config::from_env()?;
+    let config = Config::from_env().map_err(BridgeValidatorError::Config)?;
 
     // Initialize database connection pool
     let database_url =

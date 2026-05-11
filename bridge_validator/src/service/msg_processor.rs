@@ -1,11 +1,11 @@
 use crate::config::Config;
+use crate::error::BridgeValidatorError;
 use alloy::primitives::{Address, Bytes};
 use alloy::sol_types::SolEvent;
 use alloy_primitives::Log;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::error::Error;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::watch;
 use tracing;
@@ -209,7 +209,7 @@ impl MessageProcessor {
     pub async fn process_message_or_skip(
         &self,
         event_log: &EventLogRow,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), BridgeValidatorError> {
         // Deserialize the log_data JSON back into a Log object
         let log: Log = serde_json::from_value(event_log.log_data.clone())?;
 
@@ -239,7 +239,8 @@ impl MessageProcessor {
                         event_log_id: event_log.id,
                         stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
             }
             "AMB_GC" => {
                 if let Some(block_num) = event_log.block_number {
@@ -260,15 +261,17 @@ impl MessageProcessor {
                     .config
                     .amb_validator_private_key
                     .as_ref()
-                    .ok_or("AMB_VALIDATOR_PRIV_KEY must be set in .env")?;
+                    .ok_or(BridgeValidatorError::MissingEnv("AMB_VALIDATOR_PRIV_KEY"))?;
                 let pk_signer: PrivateKeySigner = priv_key_str
                     .parse()
-                    .map_err(|e| format!("Failed to parse AMB private key: {}", e))?;
+                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                        BridgeValidatorError::KeyParse(e.to_string())
+                    })?;
 
                 let signature = pk_signer
                     .sign_message(&decoded.encodedData.clone())
                     .await
-                    .map_err(|e| format!("Failed to sign AMB message: {}", e))?;
+                    .map_err(|e| BridgeValidatorError::Sign(e.to_string()))?;
 
                 self.tokio_sender
                     .send(SenderData {
@@ -282,7 +285,8 @@ impl MessageProcessor {
                         event_log_id: event_log.id,
                         stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
             }
             "XDAI_ETH" => {
                 if let Some(block_num) = event_log.block_number {
@@ -312,7 +316,8 @@ impl MessageProcessor {
                         event_log_id: event_log.id,
                         stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
             }
             "XDAI_GC" => {
                 if let Some(block_num) = event_log.block_number {
@@ -333,27 +338,28 @@ impl MessageProcessor {
                     decoded.value.clone(),
                     decoded.nonce.clone(),
                     decoded.token.clone(),
-                );
+                )?;
 
                 // Sign the xdai_message
                 let priv_key_str = self
                     .config
                     .xdai_validator_private_key
                     .as_ref()
-                    .ok_or("XDAI_VALIDATOR_PRIV_KEY must be set in .env")?;
+                    .ok_or(BridgeValidatorError::MissingEnv("XDAI_VALIDATOR_PRIV_KEY"))?;
 
                 let pk_signer: PrivateKeySigner = priv_key_str
                     .parse()
-                    .map_err(|e| format!("Failed to parse XDAI private key: {}", e))?;
+                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                        BridgeValidatorError::KeyParse(e.to_string())
+                    })?;
 
                 // Decode hex string (strip 0x prefix) to bytes for signing
-                let message_bytes = hex::decode(&xdai_message[2..])
-                    .map_err(|e| format!("Failed to decode xdai message hex: {}", e))?;
+                let message_bytes = hex::decode(&xdai_message[2..])?;
 
                 let signature: alloy_primitives::Signature = pk_signer
                     .sign_message(&message_bytes)
                     .await
-                    .map_err(|e| format!("Failed to sign XDAI message: {}", e))?;
+                    .map_err(|e| BridgeValidatorError::Sign(e.to_string()))?;
                 tracing::debug!("Signature: 0x{}", hex::encode(&signature.as_bytes()));
 
                 // Decode the hex string to actual bytes before sending
@@ -369,7 +375,8 @@ impl MessageProcessor {
                         event_log_id: event_log.id,
                         stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
                     })
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
             }
             _ => {
                 tracing::warn!("Unknown bridge mode: {}", event_log.bridge_mode);
@@ -384,7 +391,7 @@ impl MessageProcessor {
         block_number: i64,
         bc_rpc: Option<&str>,
         el_rpcs: &[String],
-    ) -> Result<bool, Box<dyn Error>> {
+    ) -> Result<bool, BridgeValidatorError> {
         let finalized_block_number = self.get_finalized_block_number(bc_rpc, el_rpcs).await?;
         Ok(block_number <= finalized_block_number)
     }
@@ -395,52 +402,71 @@ impl MessageProcessor {
         value: U256,
         nonce: FixedBytes<32>,
         token_address: Address,
-    ) -> String {
-        // Get bridge address (the foreign bridge contract address)
+    ) -> Result<String, BridgeValidatorError> {
         let bridge_address = self.config.eth_xdai_bridge_address;
 
-        // Convert each component to hex string (without 0x prefix)
         let recipient_hex = hex::encode(recipient.as_slice());
-        assert_eq!(recipient_hex.len(), 40, "Recipient should be 20 bytes");
+        if recipient_hex.len() != 40 {
+            return Err(BridgeValidatorError::InvalidFieldLength {
+                field: "recipient",
+                expected: 20,
+                actual: recipient_hex.len() / 2,
+            });
+        }
 
-        // Convert U256 to 32-byte array (big-endian)
         let value_bytes = value.to_be_bytes::<32>();
         let value_hex = hex::encode(value_bytes);
-        assert_eq!(value_hex.len(), 64, "Value should be 32 bytes");
+        if value_hex.len() != 64 {
+            return Err(BridgeValidatorError::InvalidFieldLength {
+                field: "value",
+                expected: 32,
+                actual: value_hex.len() / 2,
+            });
+        }
 
         let nonce_hex = hex::encode(nonce.as_slice());
-        assert_eq!(nonce_hex.len(), 64, "Nonce should be 32 bytes");
+        if nonce_hex.len() != 64 {
+            return Err(BridgeValidatorError::InvalidFieldLength {
+                field: "nonce",
+                expected: 32,
+                actual: nonce_hex.len() / 2,
+            });
+        }
 
         let bridge_address_hex = hex::encode(bridge_address.as_slice());
-        assert_eq!(
-            bridge_address_hex.len(),
-            40,
-            "Bridge address should be 20 bytes"
-        );
+        if bridge_address_hex.len() != 40 {
+            return Err(BridgeValidatorError::InvalidFieldLength {
+                field: "bridge_address",
+                expected: 20,
+                actual: bridge_address_hex.len() / 2,
+            });
+        }
 
         let token_address_hex = hex::encode(token_address.as_slice());
-        assert_eq!(
-            token_address_hex.len(),
-            40,
-            "Token address should be 20 bytes"
-        );
+        if token_address_hex.len() != 40 {
+            return Err(BridgeValidatorError::InvalidFieldLength {
+                field: "token_address",
+                expected: 20,
+                actual: token_address_hex.len() / 2,
+            });
+        }
 
-        // Concatenate all parts with 0x prefix
         let message = format!(
             "0x{}{}{}{}{}",
             recipient_hex, value_hex, nonce_hex, bridge_address_hex, token_address_hex
         );
 
-        // Expected length: 2 (0x) + 2 * (20 + 32 + 32 + 20 + 20) = 2 + 248 = 250
-        assert_eq!(
-            message.len(),
-            250,
-            "Message should be 124 bytes (248 hex chars + 0x)"
-        );
+        if message.len() != 250 {
+            return Err(BridgeValidatorError::InvalidFieldLength {
+                field: "message",
+                expected: 124,
+                actual: (message.len() - 2) / 2,
+            });
+        }
 
-        message
+        Ok(message)
     }
-    pub async fn read_from_db(&self) -> Result<Option<EventLogRow>, Box<dyn std::error::Error>> {
+    pub async fn read_from_db(&self) -> Result<Option<EventLogRow>, BridgeValidatorError> {
         // Read the first row from database where is_processed is 'false'
         // Set it to 'true' and return the row data
 
@@ -488,7 +514,7 @@ impl MessageProcessor {
         Ok(row)
     }
 
-    pub async fn write_is_processed_to_false(&self, id: i32) -> Result<(), Box<dyn Error>> {
+    pub async fn write_is_processed_to_false(&self, id: i32) -> Result<(), BridgeValidatorError> {
         // write is_processed to false
         sqlx::query(
             r#"
@@ -509,7 +535,7 @@ impl MessageProcessor {
         &self,
         bc_rpc: Option<&str>,
         el_rpcs: &[String],
-    ) -> Result<i64, Box<dyn Error>> {
+    ) -> Result<i64, BridgeValidatorError> {
         // Try beacon chain RPC first, if configured
         if let Some(bc_rpc) = bc_rpc {
             match self.get_finalized_block_from_beacon(bc_rpc).await {
@@ -553,13 +579,13 @@ impl MessageProcessor {
             }
         }
 
-        Err("Failed to get finalized block from all RPC endpoints".into())
+        Err(BridgeValidatorError::AllRpcsFailedForFinalizedBlock)
     }
 
     async fn get_finalized_block_from_beacon(
         &self,
         bc_rpc: &str,
-    ) -> Result<i64, Box<dyn Error>> {
+    ) -> Result<i64, BridgeValidatorError> {
         let endpoint = format!("{}/eth/v1/beacon/blocks/finalized", bc_rpc);
 
         let response = self
@@ -570,7 +596,7 @@ impl MessageProcessor {
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Beacon HTTP error: {}", response.status()).into());
+            return Err(BridgeValidatorError::BeaconHttpStatus(response.status()));
         }
 
         let block_response = response.json::<BeaconBlockResponse>().await?;
@@ -585,7 +611,7 @@ impl MessageProcessor {
     async fn get_finalized_block_from_el(
         &self,
         el_rpc: &str,
-    ) -> Result<i64, Box<dyn Error>> {
+    ) -> Result<i64, BridgeValidatorError> {
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -601,14 +627,14 @@ impl MessageProcessor {
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("EL HTTP error: {}", response.status()).into());
+            return Err(BridgeValidatorError::ElHttpStatus(response.status()));
         }
 
         let body: serde_json::Value = response.json().await?;
 
         let hex_block_number = body["result"]["number"]
             .as_str()
-            .ok_or("Empty or invalid response from EL RPC")?;
+            .ok_or(BridgeValidatorError::EmptyElResponse)?;
 
         let block_number =
             i64::from_str_radix(hex_block_number.trim_start_matches("0x"), 16)?;

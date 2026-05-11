@@ -4,6 +4,7 @@ use crate::contracts::{
     OnChainCallData, AMB_BRIDGE, AMB_BRIDGE_HELPER, XDAI_BRIDGE, XDAI_BRIDGE_HELPER,
 };
 
+use crate::error::BridgeValidatorError;
 use crate::service::msg_processor::SenderData;
 
 use alloy::{
@@ -14,7 +15,6 @@ use alloy::{
 };
 
 use sqlx::PgPool;
-use std::error::Error;
 use tokio::sync::mpsc::Receiver;
 use tracing;
 
@@ -53,7 +53,7 @@ impl OnChainSender {
         msg: OnChainCallData,
         event_log_id: i32,
         stage: &str,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), BridgeValidatorError> {
         match msg {
             OnChainCallData::AmbEth {
                 contract_address,
@@ -69,14 +69,17 @@ impl OnChainSender {
                     .config
                     .amb_validator_private_key
                     .as_ref()
-                    .ok_or("AMB_VALIDATOR_PRIV_KEY must be set in .env")?
+                    .ok_or(BridgeValidatorError::MissingEnv("AMB_VALIDATOR_PRIV_KEY"))?
                     .parse()
-                    .map_err(|e| format!("Failed to parse AMB private key: {}", e))?;
+                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                        BridgeValidatorError::KeyParse(e.to_string())
+                    })?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())
                     .connect(self.config.get_gc_rpc())
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                 let bridge_instance = AMB_BRIDGE::new(contract_address, provider.clone());
 
@@ -94,7 +97,8 @@ impl OnChainSender {
                 let already_affirmed = bridge_instance
                     .affirmationsSigned(hash_sender)
                     .call()
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                 if already_affirmed {
                     tracing::info!(
                         "AMB_ETH: affirmation already signed by validator {}, skipping",
@@ -107,10 +111,11 @@ impl OnChainSender {
                 let signed: U256 = bridge_instance
                     .numAffirmationsSigned(hash_msg)
                     .call()
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Check 3: signed < requiredSignatures()
-                let required: U256 = bridge_instance.requiredSignatures().call().await?;
+                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                 if signed >= required {
                     tracing::info!(
                         "AMB_ETH: message already has {signed} >= required {required} affirmations, skipping"
@@ -129,14 +134,14 @@ impl OnChainSender {
                         match execute_affirmation_tx.get_receipt().await {
                             Ok(execute_affirmation_receipt) => {
                                 tracing::info!(
-                                    "executeAffirmation called in transaction {:?}",
+                                    "AMB: executeAffirmation called in transaction {:?}",
                                     execute_affirmation_receipt.transaction_hash
                                 );
                                 self.delete_event_log(event_log_id).await?;
                             }
                             Err(e) => {
                                 tracing::error!(
-                                    "Failed to get receipt for executeAffirmation: {}",
+                                    "AMB: Failed to get receipt for executeAffirmation: {}",
                                     e
                                 );
                                 self.increment_retry_count(event_log_id).await?;
@@ -144,7 +149,7 @@ impl OnChainSender {
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Failed to send executeAffirmation transaction: {}", e);
+                        tracing::error!("AMB: Failed to send executeAffirmation transaction: {}", e);
                         self.increment_retry_count(event_log_id).await?;
                     }
                 }
@@ -166,18 +171,21 @@ impl OnChainSender {
                     .config
                     .amb_validator_private_key
                     .as_ref()
-                    .ok_or("AMB_VALIDATOR_PRIV_KEY must be set in .env")?
+                    .ok_or(BridgeValidatorError::MissingEnv("AMB_VALIDATOR_PRIV_KEY"))?
                     .parse()
-                    .map_err(|e| format!("Failed to parse AMB private key: {}", e))?;
+                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                        BridgeValidatorError::KeyParse(e.to_string())
+                    })?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())
                     .connect(self.config.get_gc_rpc())
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                 let bridge_instance = AMB_BRIDGE::new(contract_address, provider.clone());
 
-                let required: U256 = bridge_instance.requiredSignatures().call().await?;
+                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Stage "home": run pre-flight checks and submitSignature on home chain
                 if stage != "foreign" {
@@ -192,7 +200,7 @@ impl OnChainSender {
                     let hash_sender = keccak256(&buf);
 
                     // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
-                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await?;
+                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     // Check 1: require(!isAlreadyProcessed(signed));
                     if signed >= required {
@@ -205,7 +213,7 @@ impl OnChainSender {
 
                     // Check 2: require(!bridge_instance.messagesSigned(hashSender));
                     let already_signed_by_validator =
-                        bridge_instance.messagesSigned(hash_sender).call().await?;
+                        bridge_instance.messagesSigned(hash_sender).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                     if already_signed_by_validator {
                         tracing::info!(
                             "AMB_GC: validator {} already signed this message, skipping",
@@ -221,24 +229,24 @@ impl OnChainSender {
                             .submitSignature(calldata.signature, calldata.message.clone())
                             .send()
                             .await
-                            .map_err(|e| -> Box<dyn Error> {
+                            .map_err(|e| {
                                 tracing::error!("Failed to send submitSignature transaction: {}", e);
-                                Box::new(e)
+                                BridgeValidatorError::TxSubmit(e.to_string())
                             })?;
 
                         let submit_signature_receipt = submit_signature_tx
                             .get_receipt()
                             .await
-                            .map_err(|e| -> Box<dyn Error> {
+                            .map_err(|e| {
                                 tracing::error!("Failed to get receipt for submitSignature: {}", e);
-                                Box::new(e)
+                                BridgeValidatorError::TxReceipt(e.to_string())
                             })?;
 
                         tracing::info!(
                             "submit_signature_tx_hash {:?}",
                             submit_signature_receipt.transaction_hash
                         );
-                        Ok::<(), Box<dyn Error>>(())
+                        Ok::<(), BridgeValidatorError>(())
                     }
                     .await;
 
@@ -267,13 +275,15 @@ impl OnChainSender {
                     let signatures = bridge_helper_instance
                         .getSignatures(calldata.message.clone())
                         .call()
-                        .await?;
+                        .await
+                        .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     if signatures.len() == (2 + 65 * required.to::<usize>() - 1) {
                         let eth_provider = ProviderBuilder::new()
                             .wallet(pk_signer.clone())
                             .connect(self.config.get_eth_rpc())
-                            .await?;
+                            .await
+                            .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                         tracing::debug!(
                             "Creating foreign AMB bridge instance at address: {:?}",
@@ -359,14 +369,17 @@ impl OnChainSender {
                     .config
                     .xdai_validator_private_key
                     .as_ref()
-                    .ok_or("XDAI_VALIDATOR_PRIV_KEY must be set in .env")?
+                    .ok_or(BridgeValidatorError::MissingEnv("XDAI_VALIDATOR_PRIV_KEY"))?
                     .parse()
-                    .map_err(|e| format!("Failed to parse XDAI private key: {}", e))?;
+                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                        BridgeValidatorError::KeyParse(e.to_string())
+                    })?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())
                     .connect(self.config.get_gc_rpc())
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                 let bridge_instance = XDAI_BRIDGE::new(contract_address, provider);
 
@@ -389,7 +402,8 @@ impl OnChainSender {
                 let already_affirmed = bridge_instance
                     .affirmationsSigned(hash_sender)
                     .call()
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                 if already_affirmed {
                     tracing::info!(
                         "XDAI_ETH: affirmation already signed by validator {}, skipping",
@@ -404,10 +418,11 @@ impl OnChainSender {
                 let signed: U256 = bridge_instance
                     .numAffirmationsSigned(hash_msg)
                     .call()
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Check 3: signed < requiredSignatures()
-                let required: U256 = bridge_instance.requiredSignatures().call().await?;
+                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                 if signed >= required {
                     tracing::info!(
                         "XDAI_ETH: message already has {signed} >= required {required} affirmations, skipping"
@@ -427,14 +442,14 @@ impl OnChainSender {
                         match execute_affirmation_tx.get_receipt().await {
                             Ok(execute_affirmation_receipt) => {
                                 tracing::info!(
-                                    "executeAffirmation called in transaction {:?}",
+                                    "xDAI: executeAffirmation called in transaction {:?}",
                                     execute_affirmation_receipt.transaction_hash
                                 );
                                 self.delete_event_log(event_log_id).await?;
                             }
                             Err(e) => {
                                 tracing::error!(
-                                    "Failed to get receipt for executeAffirmation: {}",
+                                    "xDAI: Failed to get receipt for executeAffirmation: {}",
                                     e
                                 );
                                 self.increment_retry_count(event_log_id).await?;
@@ -442,7 +457,7 @@ impl OnChainSender {
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Failed to send executeAffirmation transaction: {}", e);
+                        tracing::error!("xDAI: Failed to send executeAffirmation transaction: {}", e);
                         self.increment_retry_count(event_log_id).await?;
                     }
                 }
@@ -464,18 +479,21 @@ impl OnChainSender {
                     .config
                     .xdai_validator_private_key
                     .as_ref()
-                    .ok_or("XDAI_VALIDATOR_PRIV_KEY must be set in .env")?
+                    .ok_or(BridgeValidatorError::MissingEnv("XDAI_VALIDATOR_PRIV_KEY"))?
                     .parse()
-                    .map_err(|e| format!("Failed to parse XDAI private key: {}", e))?;
+                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                        BridgeValidatorError::KeyParse(e.to_string())
+                    })?;
 
                 let provider = ProviderBuilder::new()
                     .wallet(pk_signer.clone())
                     .connect(self.config.get_gc_rpc())
-                    .await?;
+                    .await
+                    .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                 let bridge_instance = XDAI_BRIDGE::new(contract_address, provider.clone());
 
-                let required: U256 = bridge_instance.requiredSignatures().call().await?;
+                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Stage "home": run pre-flight checks and submitSignature on home chain
                 if stage != "foreign" {
@@ -490,7 +508,7 @@ impl OnChainSender {
                     let hash_sender = keccak256(&buf);
 
                     // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
-                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await?;
+                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     // Check 1: require(!isAlreadyProcessed(signed));
                     if signed >= required {
@@ -503,7 +521,7 @@ impl OnChainSender {
 
                     // Check 2: require(!bridge_instance.messagesSigned(hashSender));
                     let already_signed_by_validator =
-                        bridge_instance.messagesSigned(hash_sender).call().await?;
+                        bridge_instance.messagesSigned(hash_sender).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                     if already_signed_by_validator {
                         tracing::info!(
                             "XDAI_GC: validator {} already signed this message, skipping",
@@ -519,24 +537,24 @@ impl OnChainSender {
                             .submitSignature(calldata.signature, calldata.message.clone())
                             .send()
                             .await
-                            .map_err(|e| -> Box<dyn Error> {
+                            .map_err(|e| {
                                 tracing::error!("Failed to send submitSignature transaction: {}", e);
-                                Box::new(e)
+                                BridgeValidatorError::TxSubmit(e.to_string())
                             })?;
 
                         let submit_signature_receipt = submit_signature_tx
                             .get_receipt()
                             .await
-                            .map_err(|e| -> Box<dyn Error> {
+                            .map_err(|e| {
                                 tracing::error!("Failed to get receipt for submitSignature: {}", e);
-                                Box::new(e)
+                                BridgeValidatorError::TxReceipt(e.to_string())
                             })?;
 
                         tracing::info!(
                             "submit_signature_tx_hash {:?}",
                             submit_signature_receipt.transaction_hash
                         );
-                        Ok::<(), Box<dyn Error>>(())
+                        Ok::<(), BridgeValidatorError>(())
                     }
                     .await;
 
@@ -573,19 +591,22 @@ impl OnChainSender {
                     let msg_hash = bridge_helper_instance
                         .getMessageHash(parsed.recipient, parsed.value, parsed.nonce, parsed.token)
                         .call()
-                        .await?;
+                        .await
+                        .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     let signatures = bridge_helper_instance
                         .getSignatures(msg_hash)
                         .call()
-                        .await?;
+                        .await
+                        .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     if signatures.len() == (2 + 65 * required.to::<usize>() - 1) {
                         // Create provider for Ethereum (foreign chain)
                         let eth_provider = ProviderBuilder::new()
                             .wallet(pk_signer.clone())
                             .connect(self.config.get_eth_rpc())
-                            .await?;
+                            .await
+                            .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                         tracing::info!(
                             "Creating foreign bridge instance at address: {:?}",
@@ -663,10 +684,13 @@ impl OnChainSender {
     /// - 32 bytes: nonce (bytes32)
     /// - 20 bytes: bridge address
     /// - 20 bytes: token address
-    pub fn parse_xdai_message(message: &Bytes) -> Result<ParsedXdaiMessage, Box<dyn Error>> {
+    pub fn parse_xdai_message(message: &Bytes) -> Result<ParsedXdaiMessage, BridgeValidatorError> {
         // 20 + 32 + 32 + 20 + 20 = 124 bytes
         if message.len() != 124 {
-            return Err(format!("Unexpected xDai message length: {}", message.len()).into());
+            return Err(BridgeValidatorError::ParseXdaiMessage(format!(
+                "unexpected length: {}",
+                message.len()
+            )));
         }
 
         let bytes = message.as_ref();
@@ -692,7 +716,7 @@ impl OnChainSender {
     }
 
     /// Update the processing stage for an event log
-    async fn update_stage(&self, event_log_id: i32, stage: &str) -> Result<(), Box<dyn Error>> {
+    async fn update_stage(&self, event_log_id: i32, stage: &str) -> Result<(), BridgeValidatorError> {
         sqlx::query(
             r#"
             UPDATE event_logs
@@ -710,7 +734,7 @@ impl OnChainSender {
     }
 
     /// Increment retry count for an event log in the database
-    pub async fn increment_retry_count(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
+    pub async fn increment_retry_count(&self, event_log_id: i32) -> Result<(), BridgeValidatorError> {
         sqlx::query(
             r#"
             UPDATE event_logs
@@ -727,7 +751,7 @@ impl OnChainSender {
     }
 
     /// Delete an event log from the database
-    pub async fn delete_event_log(&self, event_log_id: i32) -> Result<(), Box<dyn Error>> {
+    pub async fn delete_event_log(&self, event_log_id: i32) -> Result<(), BridgeValidatorError> {
         sqlx::query(
             r#"
             DELETE FROM event_logs

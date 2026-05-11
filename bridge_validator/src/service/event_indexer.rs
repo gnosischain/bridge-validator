@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::contracts::{AMB_BRIDGE, XDAI_BRIDGE};
+use crate::error::BridgeValidatorError;
 use alloy::{
     hex,
     primitives::{address, b256, utils::format_ether, Address, Bytes, FixedBytes},
@@ -83,13 +84,17 @@ impl<P: Provider> EventIndexer<P> {
     pub async fn poll_events(
         &self,
         last_processed_block: u64,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> Result<u64, BridgeValidatorError> {
         tracing::debug!(
             "[{}-{}] Polling events...",
             self.provider_name,
             self.eventName
         );
-        let latest_block = self.provider.get_block_number().await?;
+        let latest_block = self
+            .provider
+            .get_block_number()
+            .await
+            .map_err(|e| BridgeValidatorError::Rpc(e.to_string()))?;
         tracing::debug!(
             "[{}-{}] Latest block: {}",
             self.provider_name,
@@ -115,7 +120,11 @@ impl<P: Provider> EventIndexer<P> {
             .event(&self.eventName)
             .from_block(start_block);
 
-        let logs = self.provider.get_logs(&filter).await?;
+        let logs = self
+            .provider
+            .get_logs(&filter)
+            .await
+            .map_err(|e| BridgeValidatorError::Rpc(e.to_string()))?;
         for log in logs.iter() {
             tracing::debug!(
                 "[{}-{}] Log found: {log:?}",

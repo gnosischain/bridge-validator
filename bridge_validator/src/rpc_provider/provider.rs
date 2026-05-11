@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::error::BridgeValidatorError;
 use alloy::{
     providers::{Provider, ProviderBuilder},
     rpc::client::RpcClient,
@@ -13,17 +14,20 @@ use tower::ServiceBuilder;
 pub async fn setup_provider(
     config: &Config,
     chain: &str,
-) -> Result<impl Provider, Box<dyn std::error::Error>> {
+) -> Result<impl Provider, BridgeValidatorError> {
     // Select which RPC array to use based on chain
     let rpc_urls = match chain {
         "eth" => &config.eth_rpc,
         "gc" => &config.gc_rpc,
-        _ => return Err(format!("Invalid chain: {}", chain).into()),
+        _ => return Err(BridgeValidatorError::InvalidChain(chain.to_string())),
     };
 
     // If only one RPC, use simple connection (no fallback needed)
     if rpc_urls.len() == 1 {
-        return Ok(ProviderBuilder::new().connect(&rpc_urls[0]).await?);
+        return ProviderBuilder::new()
+            .connect(&rpc_urls[0])
+            .await
+            .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()));
     }
 
     let mut transports = Vec::new();
