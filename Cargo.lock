@@ -5469,11 +5469,13 @@ dependencies = [
  "sqlx",
  "testcontainers",
  "testcontainers-modules",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-test",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 
