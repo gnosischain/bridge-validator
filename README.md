@@ -74,12 +74,12 @@ flowchart TB
 
 Polls a specific bridge contract on a specific chain for a specific event type. Four instances run concurrently:
 
-| Instance | Chain | Bridge | Event |
-|----------|-------|--------|-------|
-| `ETHAmb` | Ethereum | AMB | `UserRequestForAffirmation(bytes32,bytes)` |
-| `GCAmb` | Gnosis Chain | AMB | `UserRequestForSignature(bytes32,bytes)` |
-| `ETHXdai` | Ethereum | xDai | `UserRequestForAffirmation(address,uint256,bytes32)` |
-| `GCXdai` | Gnosis Chain | xDai | `UserRequestForSignature(address,uint256,bytes32,address)` |
+| Instance  | Chain        | Bridge | Event                                                      |
+| --------- | ------------ | ------ | ---------------------------------------------------------- |
+| `ETHAmb`  | Ethereum     | AMB    | `UserRequestForAffirmation(bytes32,bytes)`                 |
+| `GCAmb`   | Gnosis Chain | AMB    | `UserRequestForSignature(bytes32,bytes)`                   |
+| `ETHXdai` | Ethereum     | xDai   | `UserRequestForAffirmation(address,uint256,bytes32)`       |
+| `GCXdai`  | Gnosis Chain | xDai   | `UserRequestForSignature(address,uint256,bytes32,address)` |
 
 Each indexer tracks its `last_processed_block` in memory and only queries subsequent blocks on each poll cycle.
 
@@ -87,7 +87,7 @@ Each indexer tracks its `last_processed_block` in memory and only queries subseq
 
 Two concurrent instances process events from the database:
 
-- **Finality check**: Queries the beacon chain RPC (`/eth/v1/beacon/blocks/finalized`) for the finalized block number. Falls back to the execution-layer RPC (`eth_getBlockByNumber("finalized")`) if beacon RPC is unavailable. Events from non-finalized blocks are skipped and retried later.
+- **Finality check**: Queries the beacon chain RPC (`/eth/v2/beacon/blocks/finalized`) for the finalized block number. Falls back to the execution-layer RPC (`eth_getBlockByNumber("finalized")`) if beacon RPC is unavailable. Events from non-finalized blocks are skipped and retried later.
 - **Message signing**: For `GC -> ETH` flows (`AMB_GC`, `XDAI_GC`), the processor signs the message with the corresponding validator private key.
 - **Concurrency safety**: Uses a SQL transaction with `FOR UPDATE SKIP LOCKED` to ensure two processors never claim the same row.
 
@@ -102,12 +102,12 @@ Single instance that receives messages via a `tokio::mpsc` channel (capacity 32)
 
 Solidity ABI bindings generated via `alloy::sol!` for four contracts:
 
-| Contract | Purpose |
-|----------|---------|
-| `AMB_BRIDGE` | AMB bridge on both ETH and GC — event listening, signature submission, affirmation execution |
-| `XDAI_BRIDGE` | xDai bridge on both ETH and GC — event listening, signature submission, affirmation execution |
-| `AMB_BRIDGE_HELPER` | Helper to collect aggregated signatures for AMB foreign execution |
-| `XDAI_BRIDGE_HELPER` | Helper to compute message hashes and collect signatures for xDai foreign execution |
+| Contract             | Purpose                                                                                       |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `AMB_BRIDGE`         | AMB bridge on both ETH and GC — event listening, signature submission, affirmation execution  |
+| `XDAI_BRIDGE`        | xDai bridge on both ETH and GC — event listening, signature submission, affirmation execution |
+| `AMB_BRIDGE_HELPER`  | Helper to collect aggregated signatures for AMB foreign execution                             |
+| `XDAI_BRIDGE_HELPER` | Helper to compute message hashes and collect signatures for xDai foreign execution            |
 
 ### RPC Provider (`rpc_provider/provider.rs`)
 
@@ -138,26 +138,26 @@ cp .env.example .env
 
 ### Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ETH_RPC` | Yes | -- | Ethereum execution-layer RPC URL(s). Comma-separated for fallback. |
-| `GC_RPC` | Yes | -- | Gnosis Chain execution-layer RPC URL(s). Comma-separated for fallback. |
-| `ETH_BC_RPC` | No | Falls back to `ETH_RPC` | Ethereum beacon chain RPC URL(s) for finality checks. |
-| `GC_BC_RPC` | No | Falls back to `GC_RPC` | Gnosis Chain beacon chain RPC URL(s) for finality checks. |
-| `DATABASE_URL` | Yes | -- | PostgreSQL connection string. e.g. `postgres://user:pass@host:5432/db` |
-| `XDAI_VALIDATOR_PRIV_KEY` | No | -- | Hex-encoded private key for signing xDai bridge messages. |
-| `AMB_VALIDATOR_PRIV_KEY` | No | -- | Hex-encoded private key for signing AMB bridge messages. |
-| `ETH_AMB_BRIDGE_ADDRESS` | No | `0x4C36d2919e407f0Cc2Ee3c993ccF8ac26d9CE64e` | AMB bridge contract on Ethereum. |
-| `GC_AMB_BRIDGE_ADDRESS` | No | `0x75Df5AF045d91108662D8080fD1FEFAd6aA0bb59` | AMB bridge contract on Gnosis Chain. |
-| `ETH_XDAI_BRIDGE_ADDRESS` | No | `0x4aa42145Aa6Ebf72e164C9bBC74fbD3788045016` | xDai bridge contract on Ethereum. |
-| `GC_XDAI_BRIDGE_ADDRESS` | No | `0x7301CFA0e1756B71869E93d4e4Dca5c7d0eb0AA6` | xDai bridge contract on Gnosis Chain. |
-| `XDAI_BRIDGE_HELPER_ADDRESS` | No | `0xe30269bc61E677cD60aD163a221e464B7022fbf5` | xDai bridge helper for signature aggregation. |
-| `AMB_BRIDGE_HELPER_ADDRESS` | No | `0x7d94ece17e81355326e3359115D4B02411825EdD` | AMB bridge helper for signature aggregation. |
-| `POLL_INTERVAL_SECS` | No | `10` | Seconds between each event-indexer poll cycle. |
-| `MAX_RETRY_COUNT` | No | `5` | Maximum retry attempts before an event is dropped. |
-| `XDAI_EXECUTE_MESSAGE_ON_FOREIGN` | No | `false` | Set to `true` to also execute xDai messages on the foreign chain (ETH) after submitting the signature on the home chain (GC). |
-| `AMB_EXECUTE_MESSAGE_ON_FOREIGN` | No | `false` | Set to `true` to also execute AMB messages on the foreign chain (ETH) after submitting the signature on the home chain (GC). |
-| `RUST_LOG` | No | `info` | Log level filter. Options: `error`, `warn`, `info`, `debug`, `trace`. |
+| Variable                          | Required | Default                                      | Description                                                                                                                   |
+| --------------------------------- | -------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `ETH_RPC`                         | Yes      | --                                           | Ethereum execution-layer RPC URL(s). Comma-separated for fallback.                                                            |
+| `GC_RPC`                          | Yes      | --                                           | Gnosis Chain execution-layer RPC URL(s). Comma-separated for fallback.                                                        |
+| `ETH_BC_RPC`                      | No       | Falls back to `ETH_RPC`                      | Ethereum beacon chain RPC URL(s) for finality checks.                                                                         |
+| `GC_BC_RPC`                       | No       | Falls back to `GC_RPC`                       | Gnosis Chain beacon chain RPC URL(s) for finality checks.                                                                     |
+| `DATABASE_URL`                    | Yes      | --                                           | PostgreSQL connection string. e.g. `postgres://user:pass@host:5432/db`                                                        |
+| `XDAI_VALIDATOR_PRIV_KEY`         | No       | --                                           | Hex-encoded private key for signing xDai bridge messages.                                                                     |
+| `AMB_VALIDATOR_PRIV_KEY`          | No       | --                                           | Hex-encoded private key for signing AMB bridge messages.                                                                      |
+| `ETH_AMB_BRIDGE_ADDRESS`          | No       | `0x4C36d2919e407f0Cc2Ee3c993ccF8ac26d9CE64e` | AMB bridge contract on Ethereum.                                                                                              |
+| `GC_AMB_BRIDGE_ADDRESS`           | No       | `0x75Df5AF045d91108662D8080fD1FEFAd6aA0bb59` | AMB bridge contract on Gnosis Chain.                                                                                          |
+| `ETH_XDAI_BRIDGE_ADDRESS`         | No       | `0x4aa42145Aa6Ebf72e164C9bBC74fbD3788045016` | xDai bridge contract on Ethereum.                                                                                             |
+| `GC_XDAI_BRIDGE_ADDRESS`          | No       | `0x7301CFA0e1756B71869E93d4e4Dca5c7d0eb0AA6` | xDai bridge contract on Gnosis Chain.                                                                                         |
+| `XDAI_BRIDGE_HELPER_ADDRESS`      | No       | `0xe30269bc61E677cD60aD163a221e464B7022fbf5` | xDai bridge helper for signature aggregation.                                                                                 |
+| `AMB_BRIDGE_HELPER_ADDRESS`       | No       | `0x7d94ece17e81355326e3359115D4B02411825EdD` | AMB bridge helper for signature aggregation.                                                                                  |
+| `POLL_INTERVAL_SECS`              | No       | `10`                                         | Seconds between each event-indexer poll cycle.                                                                                |
+| `MAX_RETRY_COUNT`                 | No       | `5`                                          | Maximum retry attempts before an event is dropped.                                                                            |
+| `XDAI_EXECUTE_MESSAGE_ON_FOREIGN` | No       | `false`                                      | Set to `true` to also execute xDai messages on the foreign chain (ETH) after submitting the signature on the home chain (GC). |
+| `AMB_EXECUTE_MESSAGE_ON_FOREIGN`  | No       | `false`                                      | Set to `true` to also execute AMB messages on the foreign chain (ETH) after submitting the signature on the home chain (GC).  |
+| `RUST_LOG`                        | No       | `info`                                       | Log level filter. Options: `error`, `warn`, `info`, `debug`, `trace`.                                                         |
 
 ### Fallback RPC Example
 
@@ -202,7 +202,7 @@ docker run -d --name bridge-postgres \
   -e POSTGRES_PASSWORD=bridge_password \
   -e POSTGRES_DB=bridge_validator \
   -p 5432:5432 \
-  postgres:16-alpine
+  postgres:18-alpine
 
 # 2. Configure environment
 cp .env.example .env
@@ -228,6 +228,7 @@ docker run --env-file .env bridge-validator
 ```
 
 The Dockerfile uses a multi-stage build:
+
 - **Build stage**: `rustlang/rust:1.93.0-slim-trixie` — compiles the release binary with `SQLX_OFFLINE=true`.
 - **Runtime stage**: `debian:sid-slim` — minimal image with only `ca-certificates` and `libssl3`.
 
@@ -237,18 +238,18 @@ Migrations run automatically on startup via `sqlx::migrate!`. The database has a
 
 ### `event_logs`
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | `SERIAL PRIMARY KEY` | Auto-increment row ID. |
-| `topic_key` | `TEXT NOT NULL` | Event signature hash (identifies the event type). |
-| `bridge_mode` | `TEXT NOT NULL` | One of: `AMB_ETH`, `AMB_GC`, `XDAI_ETH`, `XDAI_GC`. |
-| `log_data` | `JSONB NOT NULL` | Full serialized `alloy::Log` object. |
-| `block_number` | `BIGINT` | Block number where the event was emitted. |
-| `transaction_hash` | `TEXT` | Transaction hash of the event. |
-| `is_processed` | `TEXT` | `"true"` or `"false"` — whether a processor has claimed this row. |
-| `retry_count` | `INT DEFAULT 0` | Number of failed processing attempts. |
-| `stage` | `TEXT DEFAULT 'home'` | Processing phase: `home` (submit signature) or `foreign` (execute on foreign chain). |
-| `created_at` | `TIMESTAMP` | Row creation time. |
+| Column             | Type                  | Description                                                                          |
+| ------------------ | --------------------- | ------------------------------------------------------------------------------------ |
+| `id`               | `SERIAL PRIMARY KEY`  | Auto-increment row ID.                                                               |
+| `topic_key`        | `TEXT NOT NULL`       | Event signature hash (identifies the event type).                                    |
+| `bridge_mode`      | `TEXT NOT NULL`       | One of: `AMB_ETH`, `AMB_GC`, `XDAI_ETH`, `XDAI_GC`.                                  |
+| `log_data`         | `JSONB NOT NULL`      | Full serialized `alloy::Log` object.                                                 |
+| `block_number`     | `BIGINT`              | Block number where the event was emitted.                                            |
+| `transaction_hash` | `TEXT`                | Transaction hash of the event.                                                       |
+| `is_processed`     | `TEXT`                | `"true"` or `"false"` — whether a processor has claimed this row.                    |
+| `retry_count`      | `INT DEFAULT 0`       | Number of failed processing attempts.                                                |
+| `stage`            | `TEXT DEFAULT 'home'` | Processing phase: `home` (submit signature) or `foreign` (execute on foreign chain). |
+| `created_at`       | `TIMESTAMP`           | Row creation time.                                                                   |
 
 **Unique constraint**: `(topic_key, transaction_hash)` prevents duplicate event insertion.
 

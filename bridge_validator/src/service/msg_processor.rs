@@ -217,7 +217,11 @@ impl MessageProcessor {
             "AMB_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_eth_bc_rpc(), &self.config.eth_rpc)
+                        .check_block_finality(
+                            block_num,
+                            self.config.get_eth_bc_rpc(),
+                            &self.config.eth_rpc,
+                        )
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -237,7 +241,10 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
-                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
+                        stage: event_log
+                            .stage
+                            .clone()
+                            .unwrap_or_else(|| "home".to_string()),
                     })
                     .await
                     .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
@@ -245,7 +252,11 @@ impl MessageProcessor {
             "AMB_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_gc_bc_rpc(), &self.config.gc_rpc)
+                        .check_block_finality(
+                            block_num,
+                            self.config.get_gc_bc_rpc(),
+                            &self.config.gc_rpc,
+                        )
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -262,11 +273,11 @@ impl MessageProcessor {
                     .amb_validator_private_key
                     .as_ref()
                     .ok_or(BridgeValidatorError::MissingEnv("AMB_VALIDATOR_PRIV_KEY"))?;
-                let pk_signer: PrivateKeySigner = priv_key_str
-                    .parse()
-                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                let pk_signer: PrivateKeySigner = priv_key_str.parse().map_err(
+                    |e: alloy::signers::local::LocalSignerError| {
                         BridgeValidatorError::KeyParse(e.to_string())
-                    })?;
+                    },
+                )?;
 
                 let signature = pk_signer
                     .sign_message(&decoded.encodedData.clone())
@@ -283,7 +294,10 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
-                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
+                        stage: event_log
+                            .stage
+                            .clone()
+                            .unwrap_or_else(|| "home".to_string()),
                     })
                     .await
                     .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
@@ -291,7 +305,11 @@ impl MessageProcessor {
             "XDAI_ETH" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_eth_bc_rpc(), &self.config.eth_rpc)
+                        .check_block_finality(
+                            block_num,
+                            self.config.get_eth_bc_rpc(),
+                            &self.config.eth_rpc,
+                        )
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -314,7 +332,10 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
-                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
+                        stage: event_log
+                            .stage
+                            .clone()
+                            .unwrap_or_else(|| "home".to_string()),
                     })
                     .await
                     .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
@@ -322,7 +343,11 @@ impl MessageProcessor {
             "XDAI_GC" => {
                 if let Some(block_num) = event_log.block_number {
                     if !self
-                        .check_block_finality(block_num, self.config.get_gc_bc_rpc(), &self.config.gc_rpc)
+                        .check_block_finality(
+                            block_num,
+                            self.config.get_gc_bc_rpc(),
+                            &self.config.gc_rpc,
+                        )
                         .await?
                     {
                         tracing::info!("Block {} not finalized yet, skipping", block_num);
@@ -347,11 +372,11 @@ impl MessageProcessor {
                     .as_ref()
                     .ok_or(BridgeValidatorError::MissingEnv("XDAI_VALIDATOR_PRIV_KEY"))?;
 
-                let pk_signer: PrivateKeySigner = priv_key_str
-                    .parse()
-                    .map_err(|e: alloy::signers::local::LocalSignerError| {
+                let pk_signer: PrivateKeySigner = priv_key_str.parse().map_err(
+                    |e: alloy::signers::local::LocalSignerError| {
                         BridgeValidatorError::KeyParse(e.to_string())
-                    })?;
+                    },
+                )?;
 
                 // Decode hex string (strip 0x prefix) to bytes for signing
                 let message_bytes = hex::decode(&xdai_message[2..])?;
@@ -373,7 +398,10 @@ impl MessageProcessor {
                             },
                         },
                         event_log_id: event_log.id,
-                        stage: event_log.stage.clone().unwrap_or_else(|| "home".to_string()),
+                        stage: event_log
+                            .stage
+                            .clone()
+                            .unwrap_or_else(|| "home".to_string()),
                     })
                     .await
                     .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
@@ -541,22 +569,14 @@ impl MessageProcessor {
             match self.get_finalized_block_from_beacon(bc_rpc).await {
                 Ok(block_number) => return Ok(block_number),
                 Err(e) => {
-                    tracing::warn!(
-                        "Beacon chain RPC failed: {}, falling back to EL RPCs",
-                        e
-                    );
+                    tracing::warn!("Beacon chain RPC failed: {}, falling back to EL RPCs", e);
                 }
             }
         }
 
         // Fallback: try EL RPCs with eth_getBlockByNumber
         for (i, el_rpc) in el_rpcs.iter().enumerate() {
-            tracing::info!(
-                "Trying EL RPC {}/{}: {}",
-                i + 1,
-                el_rpcs.len(),
-                el_rpc
-            );
+            tracing::info!("Trying EL RPC {}/{}: {}", i + 1, el_rpcs.len(), el_rpc);
             match self.get_finalized_block_from_el(el_rpc).await {
                 Ok(block_number) => {
                     tracing::info!(
@@ -586,7 +606,7 @@ impl MessageProcessor {
         &self,
         bc_rpc: &str,
     ) -> Result<i64, BridgeValidatorError> {
-        let endpoint = format!("{}/eth/v1/beacon/blocks/finalized", bc_rpc);
+        let endpoint = format!("{}/eth/v2/beacon/blocks/finalized", bc_rpc);
 
         let response = self
             .http_client
@@ -608,10 +628,7 @@ impl MessageProcessor {
             .block_number)
     }
 
-    async fn get_finalized_block_from_el(
-        &self,
-        el_rpc: &str,
-    ) -> Result<i64, BridgeValidatorError> {
+    async fn get_finalized_block_from_el(&self, el_rpc: &str) -> Result<i64, BridgeValidatorError> {
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -619,12 +636,7 @@ impl MessageProcessor {
             "params": ["finalized", false]
         });
 
-        let response = self
-            .http_client
-            .post(el_rpc)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = self.http_client.post(el_rpc).json(&payload).send().await?;
 
         if !response.status().is_success() {
             return Err(BridgeValidatorError::ElHttpStatus(response.status()));
@@ -636,8 +648,7 @@ impl MessageProcessor {
             .as_str()
             .ok_or(BridgeValidatorError::EmptyElResponse)?;
 
-        let block_number =
-            i64::from_str_radix(hex_block_number.trim_start_matches("0x"), 16)?;
+        let block_number = i64::from_str_radix(hex_block_number.trim_start_matches("0x"), 16)?;
         Ok(block_number)
     }
 }

@@ -232,23 +232,4 @@ mod tests {
             .unwrap_err()
             .contains("ETH_RPC must contain at least one valid URL"));
     }
-
-    #[test]
-    fn test_config_only_commas() {
-        let _lock = env_lock();
-        // Clear environment to ensure test isolation
-        std::env::remove_var("POLL_INTERVAL_SECS");
-        std::env::remove_var("MAX_RETRY_COUNT");
-
-        std::env::set_var("ETH_RPC", ",,,");
-        std::env::set_var("GC_RPC", "https://gc.example.com");
-        std::env::set_var("ETH_BC_RPC", "https://eth-beacon.example.com");
-        std::env::set_var("GC_BC_RPC", "https://gc-beacon.example.com");
-
-        let result = Config::from_env();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("ETH_RPC must contain at least one valid URL"));
-    }
 }

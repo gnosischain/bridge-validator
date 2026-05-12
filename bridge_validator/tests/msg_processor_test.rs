@@ -294,8 +294,8 @@ async fn test_create_xdai_message_value_encoding() {
 
     for (value, expected_hex) in test_cases {
         let message = processor
-        .create_xdai_message(recipient, value, nonce, token_address)
-        .unwrap();
+            .create_xdai_message(recipient, value, nonce, token_address)
+            .unwrap();
         let value_in_msg = &message[42..106];
         assert_eq!(
             value_in_msg, expected_hex,
@@ -667,7 +667,7 @@ async fn test_check_block_finality_block_is_finalized() {
     });
 
     Mock::given(method("GET"))
-        .and(path("/eth/v1/beacon/blocks/finalized"))
+        .and(path("/eth/v2/beacon/blocks/finalized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
         .mount(&mock_server)
         .await;
@@ -707,7 +707,7 @@ async fn test_check_block_finality_block_is_not_finalized() {
     });
 
     Mock::given(method("GET"))
-        .and(path("/eth/v1/beacon/blocks/finalized"))
+        .and(path("/eth/v2/beacon/blocks/finalized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
         .mount(&mock_server)
         .await;
@@ -747,7 +747,7 @@ async fn test_process_message_amb_eth_finalized_sends_data() {
     });
 
     Mock::given(method("GET"))
-        .and(path("/eth/v1/beacon/blocks/finalized"))
+        .and(path("/eth/v2/beacon/blocks/finalized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
         .mount(&mock_server)
         .await;
@@ -756,7 +756,12 @@ async fn test_process_message_amb_eth_finalized_sends_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
+    let processor = MessageProcessor::new(
+        config_with_mock.clone(),
+        pool.clone(),
+        tx,
+        shutdown_rx.clone(),
+    );
 
     // Create AMB_ETH event log
     let message_id = FixedBytes::<32>::from([1u8; 32]);
@@ -833,7 +838,7 @@ async fn test_process_message_amb_eth_not_finalized_writes_false() {
     });
 
     Mock::given(method("GET"))
-        .and(path("/eth/v1/beacon/blocks/finalized"))
+        .and(path("/eth/v2/beacon/blocks/finalized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
         .mount(&mock_server)
         .await;
@@ -841,7 +846,12 @@ async fn test_process_message_amb_eth_not_finalized_writes_false() {
     let mut config_with_mock = config.clone();
     config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
+    let processor = MessageProcessor::new(
+        config_with_mock.clone(),
+        pool.clone(),
+        tx,
+        shutdown_rx.clone(),
+    );
 
     // Insert test entry
     let message_id = FixedBytes::<32>::from([1u8; 32]);
@@ -946,7 +956,7 @@ async fn test_process_message_xdai_eth_finalized_sends_data() {
     });
 
     Mock::given(method("GET"))
-        .and(path("/eth/v1/beacon/blocks/finalized"))
+        .and(path("/eth/v2/beacon/blocks/finalized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
         .mount(&mock_server)
         .await;
@@ -954,7 +964,12 @@ async fn test_process_message_xdai_eth_finalized_sends_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
+    let processor = MessageProcessor::new(
+        config_with_mock.clone(),
+        pool.clone(),
+        tx,
+        shutdown_rx.clone(),
+    );
 
     // Create XDAI_ETH event log
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
@@ -1036,7 +1051,7 @@ async fn test_process_message_amb_gc_finalized_sends_signed_data() {
     });
 
     Mock::given(method("GET"))
-        .and(path("/eth/v1/beacon/blocks/finalized"))
+        .and(path("/eth/v2/beacon/blocks/finalized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
         .mount(&mock_server)
         .await;
@@ -1044,7 +1059,12 @@ async fn test_process_message_amb_gc_finalized_sends_signed_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.gc_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
+    let processor = MessageProcessor::new(
+        config_with_mock.clone(),
+        pool.clone(),
+        tx,
+        shutdown_rx.clone(),
+    );
 
     // Create AMB_GC event log (requires signature)
     let message_id = FixedBytes::<32>::from([4u8; 32]);
@@ -1127,7 +1147,7 @@ async fn test_process_message_xdai_gc_finalized_sends_signed_data() {
     });
 
     Mock::given(method("GET"))
-        .and(path("/eth/v1/beacon/blocks/finalized"))
+        .and(path("/eth/v2/beacon/blocks/finalized"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
         .mount(&mock_server)
         .await;
@@ -1135,7 +1155,12 @@ async fn test_process_message_xdai_gc_finalized_sends_signed_data() {
     let mut config_with_mock = config.clone();
     config_with_mock.gc_bc_rpc = vec![mock_server.uri()];
 
-    let processor = MessageProcessor::new(config_with_mock.clone(), pool.clone(), tx, shutdown_rx.clone());
+    let processor = MessageProcessor::new(
+        config_with_mock.clone(),
+        pool.clone(),
+        tx,
+        shutdown_rx.clone(),
+    );
 
     // Create XDAI_GC event log (requires signature)
     let recipient = address!("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0");
