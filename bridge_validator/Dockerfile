@@ -2,7 +2,7 @@
 # Requires .sqlx directory for offline mode: cargo sqlx prepare
 
 # Build stage
-FROM rustlang/rust:nightly-slim as builder
+FROM rust:slim-bookworm AS builder
 
 WORKDIR /usr/src/app
 
@@ -20,7 +20,7 @@ COPY bridge_validator/migrations ./migrations
 COPY bridge_validator/.sqlx ./.sqlx
 
 ENV SQLX_OFFLINE=true
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage
 FROM debian:bookworm-slim
