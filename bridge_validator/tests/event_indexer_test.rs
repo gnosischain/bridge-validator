@@ -135,8 +135,8 @@ async fn test_multiple_events_same_block_different_bridges() {
     {
         let (provider, asserter): (_, Asserter) = create_mock_provider();
 
-        // Mock provider responses
-        asserter.push_success(&block_number); // get_block_number()
+        // Mock provider response: only get_logs() is called now that the
+        // finalized block is supplied directly to poll_events.
         asserter.push_success(&vec![amb_eth_log.clone()]); // get_logs()
 
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -150,7 +150,7 @@ async fn test_multiple_events_same_block_different_bridges() {
             shutdown_rx,
         );
 
-        let result = indexer.poll_events(0).await;
+        let result = indexer.poll_events(0, block_number).await;
         assert!(result.is_ok(), "AMB_ETH polling should succeed");
     }
 
@@ -158,7 +158,6 @@ async fn test_multiple_events_same_block_different_bridges() {
     {
         let (provider, asserter): (_, Asserter) = create_mock_provider();
 
-        asserter.push_success(&block_number);
         asserter.push_success(&vec![amb_gc_log.clone()]);
 
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -172,7 +171,7 @@ async fn test_multiple_events_same_block_different_bridges() {
             shutdown_rx,
         );
 
-        let result = indexer.poll_events(0).await;
+        let result = indexer.poll_events(0, block_number).await;
         assert!(result.is_ok(), "AMB_GC polling should succeed");
     }
 
@@ -180,7 +179,6 @@ async fn test_multiple_events_same_block_different_bridges() {
     {
         let (provider, asserter): (_, Asserter) = create_mock_provider();
 
-        asserter.push_success(&block_number);
         asserter.push_success(&vec![xdai_eth_log.clone()]);
 
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -194,7 +192,7 @@ async fn test_multiple_events_same_block_different_bridges() {
             shutdown_rx,
         );
 
-        let result = indexer.poll_events(0).await;
+        let result = indexer.poll_events(0, block_number).await;
         assert!(result.is_ok(), "XDAI_ETH polling should succeed");
     }
 
@@ -300,7 +298,6 @@ async fn test_multiple_events_same_tx_same_topic() {
         .collect();
 
     let (provider, asserter): (_, Asserter) = create_mock_provider();
-    asserter.push_success(&block_number); // get_block_number()
     asserter.push_success(&logs); // get_logs() returns all three at once
 
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -314,7 +311,7 @@ async fn test_multiple_events_same_tx_same_topic() {
         shutdown_rx,
     );
 
-    let result = indexer.poll_events(0).await;
+    let result = indexer.poll_events(0, block_number).await;
     assert!(result.is_ok(), "polling should succeed");
 
     // All three logs must be persisted — one row per log_index, not collapsed.

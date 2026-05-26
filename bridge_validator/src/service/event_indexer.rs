@@ -23,6 +23,7 @@ pub struct EventIndexer<P> {
     contract_address: Address,
     db_pool: PgPool,
     shutdown: watch::Receiver<bool>,
+    http_client: reqwest::Client,
 }
 
 impl<P: Provider> EventIndexer<P> {
@@ -43,6 +44,7 @@ impl<P: Provider> EventIndexer<P> {
             contract_address,
             db_pool,
             shutdown,
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -54,13 +56,39 @@ impl<P: Provider> EventIndexer<P> {
         );
         let mut last_processed_block = 0;
         loop {
-            match self.poll_events(last_processed_block).await {
-                Ok(new_block) => {
-                    last_processed_block = new_block;
+            // Resolve the latest finalized block through the shared (beacon-first)
+            // finality source and only index up to there. Finalized blocks can't
+            // be reorged out, so a log we store is guaranteed to remain part of
+            // the canonical chain — closing the reorg gap that a "latest block"
+            // indexer would otherwise leave for the message processor.
+            let (bc_rpc, el_rpcs) = self.finality_rpcs();
+            match crate::service::finality::get_finalized_block_number(
+                &self.http_client,
+                bc_rpc,
+                el_rpcs,
+            )
+            .await
+            {
+                Ok(finalized_block) => {
+                    // finalized block numbers are non-negative; clamp defensively.
+                    let finalized_block = finalized_block.max(0) as u64;
+                    match self.poll_events(last_processed_block, finalized_block).await {
+                        Ok(new_block) => {
+                            last_processed_block = new_block;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "[{}-{}] Error polling events: {}",
+                                self.provider_name,
+                                self.eventName,
+                                e
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!(
-                        "[{}-{}] Error polling events: {}",
+                        "[{}-{}] Could not resolve finalized block, skipping this round: {}",
                         self.provider_name,
                         self.eventName,
                         e
@@ -81,36 +109,39 @@ impl<P: Provider> EventIndexer<P> {
         }
     }
 
+    /// Index logs in the range `(last_processed_block, finalized_block]`.
+    ///
+    /// `finalized_block` is the upper bound resolved by the caller through the
+    /// shared finality source. Only finalized blocks are indexed, and the loop
+    /// cursor advances to `finalized_block` (never to the chain tip), so blocks
+    /// between finality and the tip are revisited on a later round once they
+    /// finalize rather than being skipped.
     pub async fn poll_events(
         &self,
         last_processed_block: u64,
+        finalized_block: u64,
     ) -> Result<u64, BridgeValidatorError> {
         tracing::debug!(
             "[{}-{}] Polling events...",
             self.provider_name,
             self.eventName
         );
-        let latest_block = self
-            .provider
-            .get_block_number()
-            .await
-            .map_err(|e| BridgeValidatorError::Rpc(e.to_string()))?;
         tracing::debug!(
-            "[{}-{}] Latest block: {}",
+            "[{}-{}] Finalized block: {}",
             self.provider_name,
             self.eventName,
-            latest_block
+            finalized_block
         );
-        if latest_block <= last_processed_block {
+        if finalized_block <= last_processed_block {
             tracing::debug!(
-                "[{}-{}] Latest block is already processed",
+                "[{}-{}] No newly finalized blocks to process",
                 self.provider_name,
                 self.eventName
             );
             return Ok(last_processed_block);
         }
         let start_block = if last_processed_block == 0 {
-            latest_block // TODO: Or config.start_block
+            finalized_block // TODO: Or config.start_block
         } else {
             last_processed_block + 1
         };
@@ -118,7 +149,8 @@ impl<P: Provider> EventIndexer<P> {
         let filter = Filter::new()
             .address(self.contract_address)
             .event(&self.eventName)
-            .from_block(start_block);
+            .from_block(start_block)
+            .to_block(finalized_block);
 
         let logs = self
             .provider
@@ -196,8 +228,18 @@ impl<P: Provider> EventIndexer<P> {
             // Log found: Log { inner: Log { address: 0x4c36d2919e407f0cc2ee3c993ccf8ac26d9ce64e, data: LogData { topics: [0x482515ce3d9494a37ce83f18b72b363449458435fafdd7a53ddea7460fe01b58, 0x000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e6], data: 0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000b5000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e688ad09518695c6c3712ac10a214be5109a655671f6a78083ca3e2a662d6dd1703c939c8ace2e268d001e84800101000164125e4cfb0000000000000000000000006810e776880c02933d47db1b9fc05908e5386b9600000000000000000000000036c2879f055519593c28b56317950239c6ecd58b0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000 } }, block_hash: Some(0x223181b0230ef914af338eb648ed05c46743c985e9651b3fb2341c587e0b5f46), block_number: Some(24226354), block_timestamp: None, transaction_hash: Some(0x3108ac7fc0101b236fd43dbacac908e87f85035a65338ce9e6851773f9574706), transaction_index: Some(0), log_index: Some(1), removed: false }
         }
 
-        // Return the latest processed block
-        Ok(latest_block)
+        // Advance the cursor to the finalized block we just indexed up to.
+        Ok(finalized_block)
+    }
+
+    /// Pick the finality source (beacon RPC + EL RPC fallbacks) for the chain
+    /// this indexer watches, derived from the contract's bridge mode. ETH-side
+    /// bridges finalize against the Ethereum endpoints; GC-side against Gnosis.
+    fn finality_rpcs(&self) -> (Option<&str>, &[String]) {
+        match Self::check_bridge_mode(self.contract_address, &self.config).as_str() {
+            "AMB_ETH" | "XDAI_ETH" => (self.config.get_eth_bc_rpc(), &self.config.eth_rpc),
+            _ => (self.config.get_gc_bc_rpc(), &self.config.gc_rpc),
+        }
     }
 }
 

@@ -3,7 +3,6 @@ use crate::error::BridgeValidatorError;
 use alloy::primitives::{Address, Bytes};
 use alloy::sol_types::SolEvent;
 use alloy_primitives::Log;
-use reqwest;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::mpsc::Sender;
@@ -19,95 +18,6 @@ use alloy::{
     hex,
     signers::{local::PrivateKeySigner, Signer},
 };
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BeaconBlockResponse {
-    data: BlockData,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BlockData {
-    message: BlockMessage,
-    #[serde(default)]
-    signature: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BlockMessage {
-    #[serde(default)]
-    slot: Option<String>,
-    #[serde(default)]
-    proposer_index: Option<String>,
-    #[serde(default)]
-    parent_root: Option<String>,
-    #[serde(default)]
-    state_root: Option<String>,
-    body: BlockBody,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BlockBody {
-    #[serde(default)]
-    randao_reveal: Option<String>,
-    #[serde(default)]
-    eth1_data: Option<Eth1Data>,
-    #[serde(default)]
-    graffiti: Option<String>,
-    #[serde(default)]
-    proposer_slashings: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    attester_slashings: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    attestations: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    deposits: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    voluntary_exits: Option<Vec<serde_json::Value>>,
-    execution_payload: ExecutionPayload,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ExecutionPayload {
-    #[serde(default)]
-    parent_hash: Option<String>,
-    #[serde(default)]
-    fee_recipient: Option<Address>,
-    #[serde(default)]
-    state_root: Option<String>,
-    #[serde(default)]
-    receipts_root: Option<String>,
-    #[serde(default)]
-    logs_bloom: Option<String>,
-    #[serde(default)]
-    prev_randao: Option<String>,
-    block_number: i64,
-    #[serde(default)]
-    gas_limit: Option<String>,
-    #[serde(default)]
-    gas_used: Option<String>,
-    #[serde(default)]
-    timestamp: Option<String>,
-    #[serde(default)]
-    extra_data: Option<String>,
-    #[serde(default)]
-    base_fee_per_gas: Option<String>,
-    #[serde(default)]
-    block_hash: Option<String>,
-    #[serde(default)]
-    transactions: Option<String>,
-    #[serde(default)]
-    withdrawals: Option<String>,
-    #[serde(default)]
-    blob_gas_used: Option<String>,
-    #[serde(default)]
-    excess_blob_gas: Option<String>,
-}
-#[derive(Debug, Deserialize, Serialize)]
-struct Eth1Data {
-    deposit_root: String,
-    deposit_count: String,
-    block_hash: String,
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EventLogRow {
@@ -131,7 +41,6 @@ pub struct MessageProcessor {
     config: Config,
     db_pool: PgPool,
     tokio_sender: Sender<SenderData>,
-    http_client: reqwest::Client,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -146,7 +55,6 @@ impl MessageProcessor {
             config,
             db_pool,
             tokio_sender,
-            http_client: reqwest::Client::new(),
             shutdown,
         }
     }
@@ -215,21 +123,6 @@ impl MessageProcessor {
 
         match event_log.bridge_mode.as_str() {
             "AMB_ETH" => {
-                if let Some(block_num) = event_log.block_number {
-                    if !self
-                        .check_block_finality(
-                            block_num,
-                            self.config.get_eth_bc_rpc(),
-                            &self.config.eth_rpc,
-                        )
-                        .await?
-                    {
-                        tracing::info!("Block {} not finalized yet, skipping", block_num);
-                        self.write_is_processed_to_false(event_log.id).await?;
-                        return Ok(());
-                    }
-                }
-
                 let decoded = AMB_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
 
                 self.tokio_sender
@@ -250,21 +143,6 @@ impl MessageProcessor {
                     .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
             }
             "AMB_GC" => {
-                if let Some(block_num) = event_log.block_number {
-                    if !self
-                        .check_block_finality(
-                            block_num,
-                            self.config.get_gc_bc_rpc(),
-                            &self.config.gc_rpc,
-                        )
-                        .await?
-                    {
-                        tracing::info!("Block {} not finalized yet, skipping", block_num);
-                        self.write_is_processed_to_false(event_log.id).await?;
-                        return Ok(());
-                    }
-                }
-
                 let decoded = AMB_BRIDGE::UserRequestForSignature::decode_log(&log)?;
 
                 // sign
@@ -303,21 +181,6 @@ impl MessageProcessor {
                     .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
             }
             "XDAI_ETH" => {
-                if let Some(block_num) = event_log.block_number {
-                    if !self
-                        .check_block_finality(
-                            block_num,
-                            self.config.get_eth_bc_rpc(),
-                            &self.config.eth_rpc,
-                        )
-                        .await?
-                    {
-                        tracing::info!("Block {} not finalized yet, skipping", block_num);
-                        self.write_is_processed_to_false(event_log.id).await?;
-                        return Ok(());
-                    }
-                }
-
                 let decoded = XDAI_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
 
                 // Call safeExecuteSignaturesWithAutoGasLimit
@@ -341,21 +204,6 @@ impl MessageProcessor {
                     .map_err(|e| BridgeValidatorError::ChannelSend(e.to_string()))?;
             }
             "XDAI_GC" => {
-                if let Some(block_num) = event_log.block_number {
-                    if !self
-                        .check_block_finality(
-                            block_num,
-                            self.config.get_gc_bc_rpc(),
-                            &self.config.gc_rpc,
-                        )
-                        .await?
-                    {
-                        tracing::info!("Block {} not finalized yet, skipping", block_num);
-                        self.write_is_processed_to_false(event_log.id).await?;
-                        return Ok(());
-                    }
-                }
-
                 let decoded = XDAI_BRIDGE::UserRequestForSignature::decode_log(&log)?;
                 // message: recipient + value + nonce + bridge_address(foreign_xdai_bridge) + token_address(depends)
                 let xdai_message = self.create_xdai_message(
@@ -412,16 +260,6 @@ impl MessageProcessor {
         }
 
         Ok(())
-    }
-
-    pub async fn check_block_finality(
-        &self,
-        block_number: i64,
-        bc_rpc: Option<&str>,
-        el_rpcs: &[String],
-    ) -> Result<bool, BridgeValidatorError> {
-        let finalized_block_number = self.get_finalized_block_number(bc_rpc, el_rpcs).await?;
-        Ok(block_number <= finalized_block_number)
     }
 
     pub fn create_xdai_message(
@@ -540,115 +378,5 @@ impl MessageProcessor {
         tx.commit().await?;
 
         Ok(row)
-    }
-
-    pub async fn write_is_processed_to_false(&self, id: i32) -> Result<(), BridgeValidatorError> {
-        // write is_processed to false
-        sqlx::query(
-            r#"
-            UPDATE event_logs
-            SET is_processed = 'false'
-            WHERE id = $1
-            "#,
-        )
-        .bind(id)
-        .execute(&self.db_pool)
-        .await?;
-
-        tracing::info!("Set is_processed to false for event_log id: {}", id);
-        Ok(())
-    }
-
-    async fn get_finalized_block_number(
-        &self,
-        bc_rpc: Option<&str>,
-        el_rpcs: &[String],
-    ) -> Result<i64, BridgeValidatorError> {
-        // Try beacon chain RPC first, if configured
-        if let Some(bc_rpc) = bc_rpc {
-            match self.get_finalized_block_from_beacon(bc_rpc).await {
-                Ok(block_number) => return Ok(block_number),
-                Err(e) => {
-                    tracing::warn!("Beacon chain RPC failed: {}, falling back to EL RPCs", e);
-                }
-            }
-        }
-
-        // Fallback: try EL RPCs with eth_getBlockByNumber
-        for (i, el_rpc) in el_rpcs.iter().enumerate() {
-            tracing::info!("Trying EL RPC {}/{}: {}", i + 1, el_rpcs.len(), el_rpc);
-            match self.get_finalized_block_from_el(el_rpc).await {
-                Ok(block_number) => {
-                    tracing::info!(
-                        "Last finalized block: {} (from EL RPC {}/{})",
-                        block_number,
-                        i + 1,
-                        el_rpcs.len()
-                    );
-                    return Ok(block_number);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to get finalized block from EL RPC {}/{} ({}): {}",
-                        i + 1,
-                        el_rpcs.len(),
-                        el_rpc,
-                        e
-                    );
-                }
-            }
-        }
-
-        Err(BridgeValidatorError::AllRpcsFailedForFinalizedBlock)
-    }
-
-    async fn get_finalized_block_from_beacon(
-        &self,
-        bc_rpc: &str,
-    ) -> Result<i64, BridgeValidatorError> {
-        let endpoint = format!("{}/eth/v2/beacon/blocks/finalized", bc_rpc);
-
-        let response = self
-            .http_client
-            .get(&endpoint)
-            .header("Accept", "application/json")
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(BridgeValidatorError::BeaconHttpStatus(response.status()));
-        }
-
-        let block_response = response.json::<BeaconBlockResponse>().await?;
-        Ok(block_response
-            .data
-            .message
-            .body
-            .execution_payload
-            .block_number)
-    }
-
-    async fn get_finalized_block_from_el(&self, el_rpc: &str) -> Result<i64, BridgeValidatorError> {
-        let payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_getBlockByNumber",
-            "params": ["finalized", false]
-        });
-
-        let response = self.http_client.post(el_rpc).json(&payload).send().await?;
-
-        if !response.status().is_success() {
-            return Err(BridgeValidatorError::ElHttpStatus(response.status()));
-        }
-
-        let body: serde_json::Value = response.json().await?;
-
-        let hex_block_number = body["result"]["number"]
-            .as_str()
-            .ok_or(BridgeValidatorError::EmptyElResponse)?;
-
-        let block_number = i64::from_str_radix(hex_block_number.trim_start_matches("0x"), 16)?;
-        Ok(block_number)
     }
 }
