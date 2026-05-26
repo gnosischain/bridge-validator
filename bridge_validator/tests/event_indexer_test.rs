@@ -270,3 +270,88 @@ async fn test_multiple_events_same_block_different_bridges() {
         .unwrap();
 }
 
+/// Test Case 2: Multiple events of the SAME type within the SAME transaction.
+///
+/// Several logs of the same event (same topics[0]) can be emitted in a single
+/// transaction, distinguished only by log_index. Each must be stored as its
+/// own row.
+#[tokio::test]
+async fn test_multiple_events_same_tx_same_topic() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let config = create_test_config();
+
+    let block_number = 99987654u64;
+    // Same event signature (topic_key) for every log...
+    let topic = [0x44u8; 32];
+    // ...and the SAME transaction hash. Only log_index distinguishes them.
+    let tx_hash = "0xb444444444444444444444444444444444444444444444444444444444444444";
+
+    // Three logs of the same event, in the same tx, at log_index 0, 1, 2.
+    let logs: Vec<_> = (0..3u64)
+        .map(|log_index| {
+            create_test_log_with_address_and_topic(
+                block_number,
+                tx_hash,
+                config.eth_amb_bridge_address,
+                topic,
+                log_index,
+            )
+        })
+        .collect();
+
+    let (provider, asserter): (_, Asserter) = create_mock_provider();
+    asserter.push_success(&block_number); // get_block_number()
+    asserter.push_success(&logs); // get_logs() returns all three at once
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let indexer = EventIndexer::new(
+        config.clone(),
+        provider,
+        "eth".to_string(),
+        "UserRequestForSignature".to_string(),
+        config.eth_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx,
+    );
+
+    let result = indexer.poll_events(0).await;
+    assert!(result.is_ok(), "polling should succeed");
+
+    // All three logs must be persisted — one row per log_index, not collapsed.
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT log_index, transaction_hash, topic_key FROM event_logs \
+         WHERE block_number = $1 ORDER BY log_index ASC",
+    )
+    .bind(block_number as i64)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        rows.len(),
+        3,
+        "all 3 same-event logs in one tx should be stored, not collapsed to 1"
+    );
+
+    // log_index values are distinct and preserved.
+    assert_eq!(rows[0].0, 0);
+    assert_eq!(rows[1].0, 1);
+    assert_eq!(rows[2].0, 2);
+
+    // They genuinely share the same transaction hash and event signature,
+    // proving (transaction_hash, log_index) — not topic_key — is what keeps
+    // them apart.
+    let expected_tx = tx_hash.to_lowercase();
+    for row in &rows {
+        assert_eq!(row.1.to_lowercase(), expected_tx, "tx hash should match");
+        assert!(row.2.contains("0x44"), "topic_key should match");
+    }
+
+    // Clean up only this test's data
+    sqlx::query("DELETE FROM event_logs WHERE block_number = $1")
+        .bind(block_number as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+

@@ -246,14 +246,17 @@ Migrations run automatically on startup via `sqlx::migrate!`. The database has a
 | `log_data`         | `JSONB NOT NULL`      | Full serialized `alloy::Log` object.                                                 |
 | `block_number`     | `BIGINT`              | Block number where the event was emitted.                                            |
 | `transaction_hash` | `TEXT`                | Transaction hash of the event.                                                       |
+| `log_index`        | `BIGINT`              | Index of the log within its block (uniquely identifies a log alongside the tx hash). |
 | `is_processed`     | `TEXT`                | `"true"` or `"false"` — whether a processor has claimed this row.                    |
 | `retry_count`      | `INT DEFAULT 0`       | Number of failed processing attempts.                                                |
 | `stage`            | `TEXT DEFAULT 'home'` | Processing phase: `home` (submit signature) or `foreign` (execute on foreign chain). |
 | `created_at`       | `TIMESTAMP`           | Row creation time.                                                                   |
 
-**Unique constraint**: `(topic_key, transaction_hash)` prevents duplicate event insertion.
+**Unique constraint**: `(transaction_hash, log_index)` prevents duplicate event insertion while
+keeping distinct logs apart — a single transaction can emit several events of the same type, which
+share a `topic_key` but each have a unique `log_index`.
 
-**Indexes**: `topic_key`, `bridge_mode`, `block_number`, `transaction_hash`.
+**Indexes**: `topic_key`, `bridge_mode`, `block_number`, `transaction_hash`, `log_index`.
 
 ## Bridge Modes
 

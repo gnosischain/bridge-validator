@@ -511,7 +511,7 @@ impl MessageProcessor {
             SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count, stage
             FROM event_logs
             WHERE is_processed = 'false' AND retry_count < 5
-            ORDER BY block_number ASC
+            ORDER BY block_number ASC, log_index ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             "#

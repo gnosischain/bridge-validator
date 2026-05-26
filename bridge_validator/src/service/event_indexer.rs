@@ -138,6 +138,23 @@ impl<P: Provider> EventIndexer<P> {
                 log.transaction_hash
             );
 
+            // log_index uniquely identifies a log within a block. Mined logs
+            // always carry one; a missing value means the log isn't finalized,
+            // so skip it rather than insert a NULL that would defeat the
+            // (transaction_hash, log_index) unique constraint.
+            let log_index = match log.log_index {
+                Some(idx) => idx as i64,
+                None => {
+                    tracing::warn!(
+                        "[{}-{}] Log has no log_index, skipping database storage: tx {:?}",
+                        self.provider_name,
+                        self.eventName,
+                        log.transaction_hash
+                    );
+                    continue;
+                }
+            };
+
             // Extract the event signature (topics[0])
             if let Some(topic_key) = log.topics().get(0) {
                 let topic_key_str = format!("{:?}", topic_key);
@@ -150,9 +167,9 @@ impl<P: Provider> EventIndexer<P> {
                 // Insert into database
                 match sqlx::query(
                     r#"
-                    INSERT INTO event_logs (topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (topic_key, transaction_hash) DO NOTHING
+                    INSERT INTO event_logs (topic_key, bridge_mode, log_data, block_number, transaction_hash, log_index, is_processed)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (transaction_hash, log_index) DO NOTHING
                     "#
                 )
                 .bind(&topic_key_str)
@@ -160,6 +177,7 @@ impl<P: Provider> EventIndexer<P> {
                 .bind(&log_json)
                 .bind(log.block_number.map(|n| n as i64))
                 .bind(log.transaction_hash.map(|h| format!("{:?}", h)))
+                .bind(log_index)
                 .bind("false")
                 .execute(&self.db_pool)
                 .await {
