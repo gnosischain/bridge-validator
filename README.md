@@ -64,8 +64,8 @@ flowchart TB
 
 ### Data Flow
 
-1. **Event Indexers** poll bridge contracts for new events at a configurable interval and persist raw event logs to PostgreSQL.
-2. **Message Processors** atomically claim unprocessed rows (using `FOR UPDATE SKIP LOCKED` to avoid contention), verify block finality via the beacon chain or execution-layer RPC, decode the event, sign it if required, and forward the result through an in-memory channel.
+1. **Event Indexers** poll bridge contracts for new events at a configurable interval and persist raw event logs to PostgreSQL. Each indexer only reads up to the latest **finalized** block, so a stored log is guaranteed to be part of the canonical chain and cannot be reverted by a reorg.
+2. **Message Processors** atomically claim unprocessed rows (using `FOR UPDATE SKIP LOCKED` to avoid contention), decode the event, sign it if required, and forward the result through an in-memory channel. They do not re-check finality — every stored row is already finalized by construction (see the indexer below).
 3. **On-Chain Sender** receives signed messages, performs pre-flight duplicate checks against the bridge contract, and submits the transaction. On success, the event row is deleted; on failure, the retry count is incremented.
 
 ## Components
@@ -81,13 +81,13 @@ Polls a specific bridge contract on a specific chain for a specific event type. 
 | `ETHXdai` | Ethereum     | xDai   | `UserRequestForAffirmation(address,uint256,bytes32)`       |
 | `GCXdai`  | Gnosis Chain | xDai   | `UserRequestForSignature(address,uint256,bytes32,address)` |
 
-Each indexer tracks its `last_processed_block` in memory and only queries subsequent blocks on each poll cycle.
+Each indexer tracks its `last_processed_block` in memory and, on each poll cycle, resolves the latest finalized block through the shared finality source (`service/finality.rs` — beacon chain RPC first, execution-layer `eth_getBlockByNumber("finalized")` as fallback) and only queries logs in the range `(last_processed_block, finalized_block]`. Because the cursor advances to the finalized block rather than the chain tip, blocks between finality and the tip are revisited on a later cycle once they finalize — they are never skipped. Indexing only finalized blocks closes the reorg window: an attacker cannot get a bridge event signed off a block that is later orphaned from the canonical chain.
 
 ### Message Processor (`service/msg_processor.rs`)
 
 Two concurrent instances process events from the database:
 
-- **Finality check**: Queries the beacon chain RPC (`/eth/v2/beacon/blocks/finalized`) for the finalized block number. Falls back to the execution-layer RPC (`eth_getBlockByNumber("finalized")`) if beacon RPC is unavailable. Events from non-finalized blocks are skipped and retried later.
+- **No finality check**: Finality is enforced solely by the indexer, which only stores logs from finalized blocks. The processor therefore performs no finality lookup of its own — claiming a row implies the event is already final and part of the canonical chain.
 - **Message signing**: For `GC -> ETH` flows (`AMB_GC`, `XDAI_GC`), the processor signs the message with the corresponding validator private key.
 - **Concurrency safety**: Uses a SQL transaction with `FOR UPDATE SKIP LOCKED` to ensure two processors never claim the same row.
 
@@ -246,14 +246,17 @@ Migrations run automatically on startup via `sqlx::migrate!`. The database has a
 | `log_data`         | `JSONB NOT NULL`      | Full serialized `alloy::Log` object.                                                 |
 | `block_number`     | `BIGINT`              | Block number where the event was emitted.                                            |
 | `transaction_hash` | `TEXT`                | Transaction hash of the event.                                                       |
+| `log_index`        | `BIGINT`              | Index of the log within its block (uniquely identifies a log alongside the tx hash). |
 | `is_processed`     | `TEXT`                | `"true"` or `"false"` — whether a processor has claimed this row.                    |
 | `retry_count`      | `INT DEFAULT 0`       | Number of failed processing attempts.                                                |
 | `stage`            | `TEXT DEFAULT 'home'` | Processing phase: `home` (submit signature) or `foreign` (execute on foreign chain). |
 | `created_at`       | `TIMESTAMP`           | Row creation time.                                                                   |
 
-**Unique constraint**: `(topic_key, transaction_hash)` prevents duplicate event insertion.
+**Unique constraint**: `(transaction_hash, log_index)` prevents duplicate event insertion while
+keeping distinct logs apart — a single transaction can emit several events of the same type, which
+share a `topic_key` but each have a unique `log_index`.
 
-**Indexes**: `topic_key`, `bridge_mode`, `block_number`, `transaction_hash`.
+**Indexes**: `topic_key`, `bridge_mode`, `block_number`, `transaction_hash`, `log_index`.
 
 ## Bridge Modes
 
@@ -304,12 +307,9 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Unprocessed: Event indexed
+    [*] --> Unprocessed: Finalized event indexed
     Unprocessed --> Processing: Processor claims row<br/>(FOR UPDATE SKIP LOCKED)
-    Processing --> FinalityCheck: Decode event
-
-    FinalityCheck --> Unprocessed: Block not finalized<br/>(reset is_processed=false)
-    FinalityCheck --> Signing: Block finalized
+    Processing --> Signing: Decode event<br/>(sign if GC→ETH)
 
     Signing --> OnChainSender: Send via channel
 

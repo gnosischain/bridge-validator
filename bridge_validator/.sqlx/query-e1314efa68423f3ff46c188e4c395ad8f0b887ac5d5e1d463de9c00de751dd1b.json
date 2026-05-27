@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count, stage\n            FROM event_logs\n            WHERE is_processed = 'false' AND retry_count < 5\n            ORDER BY block_number ASC\n            LIMIT 1\n            FOR UPDATE SKIP LOCKED\n            ",
+  "query": "\n            SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count, stage\n            FROM event_logs\n            WHERE is_processed = 'false' AND retry_count < 5\n            ORDER BY block_number ASC, log_index ASC\n            LIMIT 1\n            FOR UPDATE SKIP LOCKED\n            ",
   "describe": {
     "columns": [
       {
@@ -64,5 +64,5 @@
       true
     ]
   },
-  "hash": "9df87a6b59412a23bc8862f1f8162230aa46e29cff5b6925faa51bae3859ea58"
+  "hash": "e1314efa68423f3ff46c188e4c395ad8f0b887ac5d5e1d463de9c00de751dd1b"
 }

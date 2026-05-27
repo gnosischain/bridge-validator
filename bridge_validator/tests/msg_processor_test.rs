@@ -1,8 +1,11 @@
 // Integration and unit tests for MessageProcessor
 // Setup testing environment:
 // 1. Setup mock config, refer to event_indexer_test.rs
-// 2. Mock get_finalized_block to return a fixed block number
-// 3. Test check_block_finality and create_xdai_message
+// 2. Test process_message_or_skip and create_xdai_message
+//
+// Block finality is enforced upstream by the event indexer (it only stores
+// finalized blocks), so the message processor no longer performs a finality
+// check and these tests no longer mock a beacon/finalized-block endpoint.
 
 mod common;
 
@@ -12,10 +15,6 @@ use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use common::setup_test_db;
 use tokio::sync::{mpsc, watch};
-use wiremock::{
-    matchers::{method, path},
-    Mock, MockServer, ResponseTemplate,
-};
 use worker::config::Config;
 use worker::contracts::{AMB_BRIDGE, XDAI_BRIDGE};
 use worker::service::msg_processor::{EventLogRow, MessageProcessor, SenderData};
@@ -641,120 +640,16 @@ async fn test_read_from_db_marks_as_processed() {
     assert!(result2.is_none());
 }
 
-// Test for block finality check with wiremock
-
-#[tokio::test]
-async fn test_check_block_finality_block_is_finalized() {
-    let config = create_test_config();
-    let (pool, _db_lock) = setup_test_db().await;
-    let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    // Start wiremock server
-    let mock_server = MockServer::start().await;
-
-    // Mock beacon chain response with finalized block at 200
-    let beacon_response = serde_json::json!({
-        "data": {
-            "message": {
-                "body": {
-                    "execution_payload": {
-                        "block_number": 200
-                    }
-                }
-            }
-        }
-    });
-
-    Mock::given(method("GET"))
-        .and(path("/eth/v2/beacon/blocks/finalized"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
-        .mount(&mock_server)
-        .await;
-
-    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
-
-    // Test with block 100 (should be finalized since finalized is 200)
-    let is_finalized = processor
-        .check_block_finality(100, Some(&mock_server.uri()), &[])
-        .await
-        .unwrap();
-
-    assert!(is_finalized, "Block 100 should be finalized");
-}
-
-#[tokio::test]
-async fn test_check_block_finality_block_is_not_finalized() {
-    let config = create_test_config();
-    let (pool, _db_lock) = setup_test_db().await;
-    let (tx, _rx) = mpsc::channel::<SenderData>(100);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    // Start wiremock server
-    let mock_server = MockServer::start().await;
-
-    // Mock beacon chain response with finalized block at 200
-    let beacon_response = serde_json::json!({
-        "data": {
-            "message": {
-                "body": {
-                    "execution_payload": {
-                        "block_number": 200
-                    }
-                }
-            }
-        }
-    });
-
-    Mock::given(method("GET"))
-        .and(path("/eth/v2/beacon/blocks/finalized"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
-        .mount(&mock_server)
-        .await;
-
-    let processor = MessageProcessor::new(config, pool, tx, shutdown_rx.clone());
-
-    // Test with block 300 (should NOT be finalized since finalized is 200)
-    let is_finalized = processor
-        .check_block_finality(300, Some(&mock_server.uri()), &[])
-        .await
-        .unwrap();
-
-    assert!(!is_finalized, "Block 300 should NOT be finalized");
-}
-
 // Tests for process_message_or_skip with different bridge modes
 
 #[tokio::test]
-async fn test_process_message_amb_eth_finalized_sends_data() {
+async fn test_process_message_amb_eth_sends_data() {
     let config = create_test_config();
     let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Setup wiremock for finalized block
-    let mock_server = MockServer::start().await;
-    let beacon_response = serde_json::json!({
-        "data": {
-            "message": {
-                "body": {
-                    "execution_payload": {
-                        "block_number": 200
-                    }
-                }
-            }
-        }
-    });
-
-    Mock::given(method("GET"))
-        .and(path("/eth/v2/beacon/blocks/finalized"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
-        .mount(&mock_server)
-        .await;
-
-    // Update config to use mock server
-    let mut config_with_mock = config.clone();
-    config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
+    let config_with_mock = config.clone();
 
     let processor = MessageProcessor::new(
         config_with_mock.clone(),
@@ -817,152 +712,13 @@ async fn test_process_message_amb_eth_finalized_sends_data() {
 }
 
 #[tokio::test]
-async fn test_process_message_amb_eth_not_finalized_writes_false() {
+async fn test_process_message_xdai_eth_sends_data() {
     let config = create_test_config();
     let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Setup wiremock for NOT finalized block
-    let mock_server = MockServer::start().await;
-    let beacon_response = serde_json::json!({
-        "data": {
-            "message": {
-                "body": {
-                    "execution_payload": {
-                        "block_number": 50
-                    }
-                }
-            }
-        }
-    });
-
-    Mock::given(method("GET"))
-        .and(path("/eth/v2/beacon/blocks/finalized"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
-        .mount(&mock_server)
-        .await;
-
-    let mut config_with_mock = config.clone();
-    config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
-
-    let processor = MessageProcessor::new(
-        config_with_mock.clone(),
-        pool.clone(),
-        tx,
-        shutdown_rx.clone(),
-    );
-
-    // Insert test entry
-    let message_id = FixedBytes::<32>::from([1u8; 32]);
-    let encoded_data = Bytes::from(vec![1, 2, 3, 4, 5]);
-    let event = AMB_BRIDGE::UserRequestForAffirmation {
-        messageId: message_id,
-        encodedData: encoded_data.clone(),
-    };
-
-    let log = Log {
-        inner: alloy::primitives::Log {
-            address: config_with_mock.eth_amb_bridge_address,
-            data: event.encode_log_data(),
-        },
-        block_hash: Some(FixedBytes::from([0u8; 32])),
-        block_number: Some(100),
-        block_timestamp: None,
-        transaction_hash: Some(FixedBytes::from([2u8; 32])),
-        transaction_index: Some(0),
-        log_index: Some(0),
-        removed: false,
-    };
-
-    let log_json = serde_json::to_value(&log).unwrap();
-
-    sqlx::query(
-        r#"
-        INSERT INTO event_logs (id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        "#,
-    )
-    .bind(123i32)
-    .bind("UserRequestForAffirmation")
-    .bind("AMB_ETH")
-    .bind(&log_json)
-    .bind(100i64)
-    .bind("0xg234567890123456789012345678901234567890123456789012345678901234")
-    .bind("true")
-    .bind(0i32)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let event_log = EventLogRow {
-        id: 123,
-        topic_key: "UserRequestForAffirmation".to_string(),
-        bridge_mode: "AMB_ETH".to_string(),
-        log_data: log_json,
-        block_number: Some(100),
-        transaction_hash: Some(
-            "0xg234567890123456789012345678901234567890123456789012345678901234".to_string(),
-        ),
-        is_processed: Some("true".to_string()),
-        retry_count: Some(0),
-        stage: None,
-    };
-
-    // Process the message (should skip and write false)
-    processor.process_message_or_skip(&event_log).await.unwrap();
-
-    // Verify no data was sent to channel
-    assert!(
-        rx.try_recv().is_err(),
-        "No data should be sent when not finalized"
-    );
-
-    // Verify is_processed is set to false
-    let db_row: (String,) = sqlx::query_as(
-        r#"
-        SELECT is_processed
-        FROM event_logs
-        WHERE id = $1
-        "#,
-    )
-    .bind(123i32)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert_eq!(db_row.0, "false", "is_processed should be set to false");
-}
-
-#[tokio::test]
-async fn test_process_message_xdai_eth_finalized_sends_data() {
-    let config = create_test_config();
-    let (pool, _db_lock) = setup_test_db().await;
-    let (tx, mut rx) = mpsc::channel::<SenderData>(100);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    // Setup wiremock for finalized block
-    let mock_server = MockServer::start().await;
-    let beacon_response = serde_json::json!({
-        "data": {
-            "message": {
-                "body": {
-                    "execution_payload": {
-                        "block_number": 200
-                    }
-                }
-            }
-        }
-    });
-
-    Mock::given(method("GET"))
-        .and(path("/eth/v2/beacon/blocks/finalized"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
-        .mount(&mock_server)
-        .await;
-
-    let mut config_with_mock = config.clone();
-    config_with_mock.eth_bc_rpc = vec![mock_server.uri()];
+    let config_with_mock = config.clone();
 
     let processor = MessageProcessor::new(
         config_with_mock.clone(),
@@ -1030,34 +786,13 @@ async fn test_process_message_xdai_eth_finalized_sends_data() {
 }
 
 #[tokio::test]
-async fn test_process_message_amb_gc_finalized_sends_signed_data() {
+async fn test_process_message_amb_gc_sends_signed_data() {
     let config = create_test_config_with_keys();
     let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Setup wiremock for finalized block
-    let mock_server = MockServer::start().await;
-    let beacon_response = serde_json::json!({
-        "data": {
-            "message": {
-                "body": {
-                    "execution_payload": {
-                        "block_number": 200
-                    }
-                }
-            }
-        }
-    });
-
-    Mock::given(method("GET"))
-        .and(path("/eth/v2/beacon/blocks/finalized"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
-        .mount(&mock_server)
-        .await;
-
-    let mut config_with_mock = config.clone();
-    config_with_mock.gc_bc_rpc = vec![mock_server.uri()];
+    let config_with_mock = config.clone();
 
     let processor = MessageProcessor::new(
         config_with_mock.clone(),
@@ -1126,34 +861,13 @@ async fn test_process_message_amb_gc_finalized_sends_signed_data() {
 }
 
 #[tokio::test]
-async fn test_process_message_xdai_gc_finalized_sends_signed_data() {
+async fn test_process_message_xdai_gc_sends_signed_data() {
     let config = create_test_config_with_keys();
     let (pool, _db_lock) = setup_test_db().await;
     let (tx, mut rx) = mpsc::channel::<SenderData>(100);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Setup wiremock for finalized block
-    let mock_server = MockServer::start().await;
-    let beacon_response = serde_json::json!({
-        "data": {
-            "message": {
-                "body": {
-                    "execution_payload": {
-                        "block_number": 200
-                    }
-                }
-            }
-        }
-    });
-
-    Mock::given(method("GET"))
-        .and(path("/eth/v2/beacon/blocks/finalized"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&beacon_response))
-        .mount(&mock_server)
-        .await;
-
-    let mut config_with_mock = config.clone();
-    config_with_mock.gc_bc_rpc = vec![mock_server.uri()];
+    let config_with_mock = config.clone();
 
     let processor = MessageProcessor::new(
         config_with_mock.clone(),
