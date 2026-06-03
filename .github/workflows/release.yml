@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+# Default to read-only; elevate per-job only where required (the release job).
+permissions:
+  contents: read
+
+# One release per tag; never cancel a release mid-flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: gnosischain/bridge-validator
+
+jobs:
+  # 1) Create the GitHub Release for the pushed tag.
+  release:
+    name: create github release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write          # only this job needs write to create the release
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: tag,
+              generate_release_notes: true,
+              draft: false,
+              prerelease: false,
+            });
+
+  # 2) Build & push the multi-arch production image to Docker Hub.
+  docker:
+    name: build & push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60          # multi-arch arm64 builds under emulation are slow
+    needs: release
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Derive both the raw tag (v1.2.3) and the bare semver (1.2.3) via
+      # $GITHUB_OUTPUT (replaces the deprecated ::set-output).
+      - name: Resolve version
+        id: ver
+        run: |
+          raw="${GITHUB_REF_NAME}"
+          echo "raw=${raw}" >> "$GITHUB_OUTPUT"
+          echo "semver=${raw#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          username: ${{ secrets.DOCKERHUB_ACCESS_TOKEN_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN_SECRET }}
+
+      - name: Build and push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ./bridge_validator/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.raw }}
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.semver }}
+            ${{ env.IMAGE }}:latest
+
+  # 3) Notify Slack (always runs so failures are reported too).
+  notify:
+    name: notify slack
+    needs: [release, docker]
+    if: always()
+    uses: ./.github/workflows/slack_release_notification.yml
+    with:
+      service: Bridge Validator
+      environment: Production
+      success: ${{ needs.release.result == 'success' && needs.docker.result == 'success' }}
+      message: >-
+        Released `Bridge Validator` version `${{ github.ref_name }}`. Triggered by
+        `${{ github.actor }}`. Docker image:
+        https://hub.docker.com/r/gnosischain/bridge-validator/tags?name=${{ github.ref_name }}
+    # Pass only the secret the reusable workflow needs (least privilege),
+    # rather than `secrets: inherit` which would forward all caller secrets.
+    secrets:
+      RELEASES_SLACK_WEBHOOK_URL: ${{ secrets.RELEASES_SLACK_WEBHOOK_URL }}
