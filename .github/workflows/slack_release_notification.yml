@@ -44,21 +44,26 @@ jobs:
         with:
           webhook: ${{ secrets.RELEASES_SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
+          # Every dynamic value is wrapped in toJSON() so it becomes a fully
+          # quoted + escaped JSON literal. This keeps the payload valid even if
+          # an input contains quotes, backslashes, newlines or braces, and
+          # prevents payload injection via crafted input. Do NOT add surrounding
+          # quotes — toJSON() already produces them.
           payload: |
             {
               "username": "Releases",
               "icon_url": "https://avatars3.githubusercontent.com/u/134083290",
-              "text": "${{ inputs.message }}",
+              "text": ${{ toJSON(inputs.message) }},
               "attachments": [
                 {
-                  "color": "${{ inputs.success && '#36a64f' || '#FF3131' }}",
-                  "author_name": "${{ inputs.service }}",
+                  "color": ${{ toJSON(inputs.success && '#36a64f' || '#FF3131') }},
+                  "author_name": ${{ toJSON(inputs.service) }},
                   "fields": [
-                    { "title": "Environment", "value": "`${{ inputs.environment }}`", "short": true },
-                    { "title": "Ref",         "value": "${{ github.ref_name }}",       "short": true },
-                    { "title": "Commit",      "value": "${{ github.sha }}",            "short": true },
-                    { "title": "Status",      "value": "${{ inputs.success && '🟢 SUCCEEDED' || '🔴 FAILED' }}", "short": true },
-                    { "title": "Time",        "value": "${{ steps.meta.outputs.time }}", "short": true }
+                    { "title": "Environment", "value": ${{ toJSON(format('`{0}`', inputs.environment)) }}, "short": true },
+                    { "title": "Ref",         "value": ${{ toJSON(github.ref_name) }}, "short": true },
+                    { "title": "Commit",      "value": ${{ toJSON(github.sha) }}, "short": true },
+                    { "title": "Status",      "value": ${{ toJSON(inputs.success && '🟢 SUCCEEDED' || '🔴 FAILED') }}, "short": true },
+                    { "title": "Time",        "value": ${{ toJSON(steps.meta.outputs.time) }}, "short": true }
                   ]
                 }
               ]
