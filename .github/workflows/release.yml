@@ -96,4 +96,7 @@ jobs:
         Released `Bridge Validator` version `${{ github.ref_name }}`. Triggered by
         `${{ github.actor }}`. Docker image:
         https://hub.docker.com/r/gnosischain/bridge-validator/tags?name=${{ github.ref_name }}
-    secrets: inherit
+    # Pass only the secret the reusable workflow needs (least privilege),
+    # rather than `secrets: inherit` which would forward all caller secrets.
+    secrets:
+      RELEASES_SLACK_WEBHOOK_URL: ${{ secrets.RELEASES_SLACK_WEBHOOK_URL }}
