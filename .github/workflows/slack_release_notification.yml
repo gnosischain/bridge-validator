@@ -1,0 +1,65 @@
+name: Slack Release Notification
+
+# Reusable workflow: posts a release notification to Slack via an incoming webhook.
+# Called by release.yml. `environment` is a plain message label, NOT a GitHub
+# deployment Environment (so no environment protection rules are required).
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Human-readable service name.
+        required: true
+        type: string
+      environment:
+        description: Environment label (string only — not a GitHub Environment).
+        required: true
+        type: string
+      success:
+        description: Whether the release succeeded.
+        required: true
+        type: boolean
+      message:
+        description: Free-form message body.
+        required: true
+        type: string
+    secrets:
+      RELEASES_SLACK_WEBHOOK_URL:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: post to slack
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Compute timestamp
+        id: meta
+        run: echo "time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
+
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
+        with:
+          webhook: ${{ secrets.RELEASES_SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "username": "Releases",
+              "icon_url": "https://avatars3.githubusercontent.com/u/134083290",
+              "text": "${{ inputs.message }}",
+              "attachments": [
+                {
+                  "color": "${{ inputs.success && '#36a64f' || '#FF3131' }}",
+                  "author_name": "${{ inputs.service }}",
+                  "fields": [
+                    { "title": "Environment", "value": "`${{ inputs.environment }}`", "short": true },
+                    { "title": "Ref",         "value": "${{ github.ref_name }}",       "short": true },
+                    { "title": "Commit",      "value": "${{ github.sha }}",            "short": true },
+                    { "title": "Status",      "value": "${{ inputs.success && '🟢 SUCCEEDED' || '🔴 FAILED' }}", "short": true },
+                    { "title": "Time",        "value": "${{ steps.meta.outputs.time }}", "short": true }
+                  ]
+                }
+              ]
+            }
