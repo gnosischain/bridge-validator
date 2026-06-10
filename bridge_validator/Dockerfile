@@ -2,7 +2,10 @@
 # Requires .sqlx directory for offline mode: cargo sqlx prepare
 
 # Build stage
-FROM rust:slim-bookworm AS builder
+# Pinned by digest so rebuilds resolve the exact base CI used (tags are mutable).
+# Multi-arch index for rust:slim-bookworm (rust 1.x stable, resolved 2026-06-10;
+# linux/amd64 manifest: sha256:c87db6b683e63a304c12d50f4bafc3fa71c1b10a16a66269c353e621252d6307).
+FROM rust:slim-bookworm@sha256:b5f842fac1e3b4ff718a652a8e0173b62d9403ec826ef4998880b9347db30684 AS builder
 
 WORKDIR /usr/src/app
 
@@ -23,7 +26,9 @@ ENV SQLX_OFFLINE=true
 RUN cargo build --release --locked
 
 # Runtime stage
-FROM debian:bookworm-slim
+# Multi-arch index for debian:bookworm-slim (resolved 2026-06-10;
+# linux/amd64 manifest: sha256:b29f74a267526ae6ea104eed6c46133b0ca70ce812525df8cd5817698f0a624a).
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
 
 WORKDIR /app
 
