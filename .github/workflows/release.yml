@@ -14,9 +14,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  IMAGE: gnosischain/bridge-validator
-
 jobs:
   # 1) Create the GitHub Release for the pushed tag.
   release:
@@ -41,46 +38,44 @@ jobs:
             });
 
   # 2) Build & push the multi-arch production image to Docker Hub.
+  #
+  # Uses Docker's official GitHub Builder reusable workflow. With distribute:true
+  # (its default) each platform builds on its own NATIVE runner — arm64 maps to
+  # ubuntu-24.04-arm — so there's no QEMU emulation (the old bottleneck). It also
+  # emits signed SLSA provenance (needs id-token: write), an SBOM, and uses the
+  # signed GitHub Actions cache.
   docker:
     name: build & push image
-    runs-on: ubuntu-latest
-    timeout-minutes: 60          # multi-arch arm64 builds under emulation are slow
     needs: release
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      # Derive both the raw tag (v1.2.3) and the bare semver (1.2.3) via
-      # $GITHUB_OUTPUT (replaces the deprecated ::set-output).
-      - name: Resolve version
-        id: ver
-        run: |
-          raw="${GITHUB_REF_NAME}"
-          echo "raw=${raw}" >> "$GITHUB_OUTPUT"
-          echo "semver=${raw#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
+    permissions:
+      contents: read
+      id-token: write          # required for signed SLSA provenance attestation
+    uses: docker/github-builder/.github/workflows/build.yml@70ac3fc303efa83d2b94905e6ab78bb83cbdc2ae # v1.11.0
+    with:
+      output: image
+      push: true
+      platforms: linux/amd64,linux/arm64
+      file: ./bridge_validator/Dockerfile
+      context: .
+      cache: true
+      cache-mode: max
+      sbom: true
+      set-meta-labels: true
+      # env context isn't available in a reusable-call `with:`, so the image name
+      # is inlined here. The three tags reproduce the previous set exactly:
+      #   {{version}} -> 1.2.3 (metadata-action strips the leading v)
+      #   ref/tag     -> v1.2.3 (literal git tag)
+      #   raw         -> latest
+      meta-images: gnosischain/bridge-validator
+      meta-tags: |
+        type=semver,pattern={{version}}
+        type=ref,event=tag
+        type=raw,value=latest
+    secrets:
+      registry-auths: |
+        - registry: docker.io
           username: ${{ secrets.DOCKERHUB_ACCESS_TOKEN_USERNAME }}
           password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN_SECRET }}
-
-      - name: Build and push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          file: ./bridge_validator/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.ver.outputs.raw }}
-            ${{ env.IMAGE }}:${{ steps.ver.outputs.semver }}
-            ${{ env.IMAGE }}:latest
 
   # 3) Notify Slack (always runs so failures are reported too).
   notify:
