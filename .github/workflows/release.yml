@@ -142,7 +142,8 @@ jobs:
           The output should equal the digest above.
           EOF
           )
-          gh release edit "$TAG" --repo "$REPO" --notes-append "$NOTES"
+          EXISTING=$(gh release view "$TAG" --repo "$REPO" --json body --jq .body)
+          printf '%s\n%s\n' "$EXISTING" "$NOTES" | gh release edit "$TAG" --repo "$REPO" --notes-file -
 
   # 4) Notify Slack (always runs so failures are reported too).
   notify:
