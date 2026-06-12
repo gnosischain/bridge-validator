@@ -17,10 +17,11 @@
 # single slice only, set PLATFORMS, e.g. PLATFORMS=linux/amd64.
 #
 # Usage: ./verify.sh <TAG> <EXPECTED_SOURCE_COMMIT>
-#   EXPECTED_SOURCE_COMMIT is required and must come from a trusted,
-#   out-of-band source: tags are mutable, and a re-pointed tag plus a matching
-#   malicious image would otherwise pass (the rebuild only proves
-#   image-matches-its-source, not that the source is the one you trust).
+#   EXPECTED_SOURCE_COMMIT is required, must be the full 40-char hex SHA, and
+#   must come from a trusted, out-of-band source: tags are mutable, and a
+#   re-pointed tag plus a matching malicious image would otherwise pass (the
+#   rebuild only proves image-matches-its-source, not that the source is the
+#   one you trust). Short SHAs are rejected — prefixes are brute-forceable.
 #
 # Optional env: SOURCE_REPO, IMAGE_REPO, PLATFORMS (space-separated)
 # Requires: docker (+buildx), git; emulation for the non-native slice.
@@ -31,6 +32,10 @@ set -euo pipefail
 
 TAG="${1:?Usage: $0 <TAG> <EXPECTED_SOURCE_COMMIT>}"
 EXPECTED_COMMIT="${2:?EXPECTED_SOURCE_COMMIT is required — obtain it out-of-band}"
+if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo "ERROR: EXPECTED_SOURCE_COMMIT must be a full 40-char hex SHA (got '$EXPECTED_COMMIT')." >&2
+  exit 2
+fi
 SOURCE_REPO="${SOURCE_REPO:-https://github.com/gnosischain/bridge-validator.git}"
 IMAGE_REPO="${IMAGE_REPO:-gnosischain/bridge-validator}"
 PLATFORMS="${PLATFORMS:-linux/amd64 linux/arm64}"
@@ -41,7 +46,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 echo "=== Clone $SOURCE_REPO @ $TAG ==="
 git clone --quiet --depth=1 --branch "$TAG" "$SOURCE_REPO" "$WORKDIR/src"
 SOURCE_COMMIT=$(git -C "$WORKDIR/src" rev-parse HEAD)
-if [[ "$(echo "$SOURCE_COMMIT" | tr '[:upper:]' '[:lower:]')" != "$(echo "$EXPECTED_COMMIT" | tr '[:upper:]' '[:lower:]')"* ]]; then
+if [[ "$(echo "$SOURCE_COMMIT" | tr '[:upper:]' '[:lower:]')" != "$(echo "$EXPECTED_COMMIT" | tr '[:upper:]' '[:lower:]')" ]]; then
   echo "ERROR: tag '$TAG' resolves to $SOURCE_COMMIT, expected $EXPECTED_COMMIT." >&2
   echo "       The tag may have been re-pointed on the remote. Stop and investigate." >&2
   exit 2
