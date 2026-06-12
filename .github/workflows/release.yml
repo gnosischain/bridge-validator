@@ -77,19 +77,87 @@ jobs:
           username: ${{ secrets.DOCKERHUB_ACCESS_TOKEN_USERNAME }}
           password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN_SECRET }}
 
-  # 3) Notify Slack (always runs so failures are reported too).
+  # 3) Record the (commit -> digest) binding for lightweight verification.
+  # Own job because `docker` calls a reusable workflow and cannot run `steps:`.
+  # The digest is the pushed multi-arch INDEX digest — the same value
+  # `docker buildx imagetools inspect --format '{{.Manifest.Digest}}'` returns.
+  record-binding:
+    name: record release binding
+    needs: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write          # gh release edit
+    steps:
+      - name: Record release binding
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG:    ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.docker.outputs.digest }}
+          IMAGE:  gnosischain/bridge-validator
+          REPO:   ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$DIGEST" ]]; then
+            echo "::error::No digest emitted by build step — aborting." >&2
+            exit 1
+          fi
+
+          # 1. Workflow run summary (visible on the Actions tab)
+          {
+            echo "## Release binding"
+            echo
+            echo "| field  | value |"
+            echo "|--------|-------|"
+            echo "| tag    | \`$TAG\` |"
+            echo "| commit | \`$COMMIT\` |"
+            echo "| image  | \`$IMAGE:$TAG\` |"
+            echo "| digest | \`$DIGEST\` |"
+            echo
+            echo "Verify locally:"
+            echo
+            echo '```bash'
+            echo "ACTUAL=\$(docker buildx imagetools inspect $IMAGE:$TAG --format '{{.Manifest.Digest}}')"
+            echo "[ \"\$ACTUAL\" = \"$DIGEST\" ] && echo match || echo MISMATCH"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 2. Durable: append the binding to the GitHub Release body
+          NOTES=$(cat <<EOF
+
+          ---
+
+          **Published image**
+
+          - image:  \`$IMAGE:$TAG\`
+          - digest: \`$DIGEST\`
+          - commit: \`$COMMIT\`
+
+          Verify (one command, no rebuild):
+          \`\`\`
+          docker buildx imagetools inspect $IMAGE:$TAG --format '{{.Manifest.Digest}}'
+          \`\`\`
+          The output should equal the digest above.
+          EOF
+          )
+          gh release edit "$TAG" --repo "$REPO" --notes-append "$NOTES"
+
+  # 4) Notify Slack (always runs so failures are reported too).
   notify:
     name: notify slack
-    needs: [release, docker]
+    needs: [release, docker, record-binding]
     if: always()
     uses: ./.github/workflows/slack_release_notification.yml
     with:
       service: Bridge Validator
       environment: Production
-      success: ${{ needs.release.result == 'success' && needs.docker.result == 'success' }}
+      success: ${{ needs.release.result == 'success' && needs.docker.result == 'success' && needs.record-binding.result == 'success' }}
       message: >-
-        Released `Bridge Validator` version `${{ github.ref_name }}`. Triggered by
-        `${{ github.actor }}`. Docker image:
+        Released `Bridge Validator` version `${{ github.ref_name }}` from commit
+        `${{ github.sha }}`. Triggered by `${{ github.actor }}`. Image digest:
+        `${{ needs.docker.outputs.digest }}`. Docker Hub:
         https://hub.docker.com/r/gnosischain/bridge-validator/tags?name=${{ github.ref_name }}
     # Pass only the secret the reusable workflow needs (least privilege),
     # rather than `secrets: inherit` which would forward all caller secrets.
