@@ -5,14 +5,13 @@ built from this repo at git tag `<TAG>`. For the quick path, use
 [`HOW_TO_VERIFY.md`](./HOW_TO_VERIFY.md) + the root-level `verify.sh`.
 This doc covers the manual procedure, the trust model, and the limitations.
 
-Run the first two on every release (each proves
-a different thing); the full rebuild is the periodic trust-nothing audit:
+Run the fast check on every release; the full rebuild is the periodic
+trust-nothing audit:
 
-| Check                           | Cost      | Proves                                                          |
-| ------------------------------- | --------- | --------------------------------------------------------------- |
-| **Fast** — digest vs record     | seconds   | The served image == the one CI recorded. Catches re-pointing.   |
-| **Signature** — `cosign verify` | seconds   | The image was built/signed by the CI pipeline. Catches forgery. |
-| **Full** — rebuild + diff       | minutes\* | Image payload == this source at `<TAG>`. Catches tampering.     |
+| Check                       | Cost      | Proves                                                        |
+| --------------------------- | --------- | ------------------------------------------------------------ |
+| **Fast** — digest vs record | seconds   | The served image == the one CI recorded. Catches re-pointing. |
+| **Full** — rebuild + diff   | minutes\* | Image payload == this source at `<TAG>`. Catches tampering.   |
 
 \* per platform slice; the non-native slice runs under emulation and a Rust
 release build there often takes 30+ min.
@@ -36,13 +35,11 @@ SOURCE_REPO=https://github.com/gnosischain/bridge-validator
 - That `<TAG>` is a safe/correct release — this is build integrity, not code
   review.
 - That the CI runner was uncompromised — identical bytes from the same source
-  still pass, and the cosign signature only proves the pipeline signed it, not
-  that the pipeline was honest.
+  still pass.
 - Authenticity of the **tag** — trusted as served by the remote; pin the commit
-  with `EXPECTED_SOURCE_COMMIT`. (The digest→builder→repo link IS authenticated
-  by the signature check for releases from v0.1.2; the commit↔digest binding in
-  the Release body is plaintext, but here it is _also_ cryptographically
-  attested — see [Provenance](#appendix--provenance) below.)
+  with `EXPECTED_SOURCE_COMMIT`. (The commit↔digest binding in the Release body
+  is plaintext; it is also recorded in the SLSA build provenance, though that
+  attestation is unsigned — see [Provenance](#appendix--provenance) below.)
 - That image IDs / manifest digests match the local rebuild — they never will
   (wall-clock timestamps in the OCI config). The full check compares
   **filesystem content** instead.
@@ -68,31 +65,8 @@ LIVE_DIGEST=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{.Manife
 investigate.** No `gh`? Read `digest:` from the release page by eye.
 
 **Trust:** the recorded digest is a plaintext record, not a signature. It
-defends against post-publish re-pointing, not a malicious publish. Pair it with
-the signature check below; use the full check if you don't trust the pipeline
-at all.
-
----
-
-## Signature check — `cosign verify`
-
-The build pipeline (Docker's `github-builder` reusable workflow) signs the
-image's attestation manifests with keyless cosign on every push. Verifying the
-signature proves the digest was produced by that workflow running on GitHub
-Actions in _this repository_, with the trust anchor in the public Sigstore
-transparency log.
-
-Command: [`HOW_TO_VERIFY.md` §2](./HOW_TO_VERIFY.md). Verify against
-`$RECORDED_DIGEST`, never the tag.
-
-**Trust:** the certificate identity is the _reusable_ workflow
-(`docker/github-builder/.github/workflows/build.yml@...`), which any repository
-could call — the binding to _this repo's_ build comes from
-`--certificate-github-workflow-repository gnosischain/bridge-validator`. The
-signature attests _who built_ the image, not _what is in_ it (that is the full
-check), and says nothing about whether the CI runner itself was compromised.
-Tags v0.1.1 and older predate the signing pipeline and fail with "no matching
-signatures".
+defends against post-publish re-pointing, not a malicious publish. Use the full
+check if you don't trust the pipeline at all.
 
 ---
 
@@ -206,8 +180,7 @@ Exit codes: `0` pass · `1` payload diff under `/app` (possible tampering) ·
 
 ## Limitations & path forward
 
-The full check is content comparison; the _who built it_ gap is covered by the
-[signature check](#signature-check--cosign-verify). What still relies on trust:
+The full check is content comparison. What still relies on trust:
 the tag/commit (pin with `EXPECTED_SOURCE_COMMIT`) and the honesty of the CI
 runner (see [What the checks do NOT prove](#what-the-checks-do-not-prove)).
 `verify.sh` prints these gaps on every run.
@@ -230,10 +203,10 @@ Provenance is keyed per platform in multi-arch images:
 `(index .Provenance "linux/amd64").SLSA` (similarly `linux/arm64`).
 
 Because the release workflow triggers on the tag push itself, `github_sha` in
-the signed provenance _is_ the release commit. The commit↔digest binding is
-therefore cryptographically attested, not merely recorded in the plaintext
-Release body — the Release-body record is a convenience copy. You can read it
-directly:
+the SLSA provenance _is_ the release commit, recording the commit↔digest binding
+alongside the plaintext Release body. The provenance is an unsigned build
+attestation, so treat it as a second record rather than a cryptographic proof.
+You can read it directly:
 
 ```bash
 docker buildx imagetools inspect "$IMAGE:$TAG" \

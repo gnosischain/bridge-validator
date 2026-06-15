@@ -1,6 +1,6 @@
 # How to Verify a Published Bridge Validator Image
 
-Run checks 1 **and** 2 on every release. Run check 3 when you want
+Run check 1 on every release. Run check 2 when you want
 to trust nothing but the source. For the full reasoning, see
 [`VERIFICATION_DETAILS.md`](./VERIFICATION_DETAILS.md).
 
@@ -21,32 +21,7 @@ docker buildx imagetools inspect gnosischain/bridge-validator:<VERSION> \
 Output equals `RECORDED_DIGEST` → pass. Mismatch → the tag was re-pointed;
 **stop and investigate.**
 
-## 2. Signature check with cosign
-
-> Checks that the image was built and signed by Docker's `github-builder`
-> workflow on GitHub Actions — anchored in the public Sigstore transparency
-> log — so a forged Release body or a compromised registry cannot fool you.
-
-Requires [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/).
-Verify against the digest, not the tag (tags are mutable):
-
-```bash
-cosign verify \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/docker/github-builder/.github/workflows/build.yml.*$' \
-  --certificate-github-workflow-repository gnosischain/bridge-validator \
-  gnosischain/bridge-validator@sha256:<RECORDED_DIGEST>
-```
-
-Success prints the verified claims and the signing certificate's identity.
-The `--certificate-github-workflow-repository` flag pins the calling
-repository cryptographically — the signature then proves the image was built
-by `github-builder` _invoked from this repo_.
-
-Note: only releases built by the github-builder pipeline are signed; older
-tags (v0.1.1 or less) fail with "no matching signatures".
-
-## 3. Full audit: rebuild from source
+## 2. Full audit: rebuild from source
 
 > Checks that the published image's application payload (`/app`: the `worker`
 > binary + `migrations`) is byte-identical to what the source at the release

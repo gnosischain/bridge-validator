@@ -100,7 +100,7 @@ if (( ${#FAILED[@]} == 0 )); then
   echo
   echo "  Not verified by this run: that EXPECTED_SOURCE_COMMIT is the commit"
   echo "  you intend, and that the CI runner was uncompromised — pair with the"
-  echo "  digest and cosign checks in bridge_validator/HOW_TO_VERIFY.md."
+  echo "  digest check in bridge_validator/HOW_TO_VERIFY.md."
   echo "================================================================"
   exit 0
 else
