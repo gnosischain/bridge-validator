@@ -21,6 +21,39 @@ docker buildx imagetools inspect gnosischain/bridge-validator:<VERSION> \
 Output equals `RECORDED_DIGEST` → pass. Mismatch → the tag was re-pointed;
 **stop and investigate.**
 
+**Example output for v0.1.3**
+
+```bash
+% docker buildx imagetools inspect gnosischain/bridge-validator:v0.1.3 --format '{{.Manifest.Digest}}'
+
+Name:      docker.io/gnosischain/bridge-validator:v0.1.3
+MediaType: application/vnd.oci.image.index.v1+json
+Digest:    sha256:5e08ce065ea2edfd2e9aee3d798c0523dd2a1ebba4d201247e55d13e4b7cb75a # <--- Should match this digest
+
+Manifests:
+  Name:        docker.io/gnosischain/bridge-validator:v0.1.3@sha256:a278b5a4ca39230ad77f3f2c461a484f77137079530120bbe38cb4310866d193  # <--- amd64 image (referenced by attestation below)
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    linux/amd64
+
+  Name:        docker.io/gnosischain/bridge-validator:v0.1.3@sha256:14f411bc6c840e81fb4f517f33f36d467c409582193b5f865cc44048465bbd8f # <--- Needed for cosign verify (amd64 attestation)
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    unknown/unknown
+  Annotations:
+    vnd.docker.reference.digest: sha256:a278b5a4ca39230ad77f3f2c461a484f77137079530120bbe38cb4310866d193
+    vnd.docker.reference.type:   attestation-manifest
+
+  Name:        docker.io/gnosischain/bridge-validator:v0.1.3@sha256:5ec3d99ce31698bb7b22c108e9e0e971bddc004162d71899af6e00b8b48e20b8 # <--- arm64 image (referenced by attestation below)
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    linux/arm64
+
+  Name:        docker.io/gnosischain/bridge-validator:v0.1.3@sha256:2c3618855dde6994cba746cadca53d8f249cad27d7d0f763cceaeee8285918f4 # <--- Needed for cosign verify (arm64 attestation)
+  MediaType:   application/vnd.oci.image.manifest.v1+json
+  Platform:    unknown/unknown
+  Annotations:
+    vnd.docker.reference.digest: sha256:5ec3d99ce31698bb7b22c108e9e0e971bddc004162d71899af6e00b8b48e20b8
+    vnd.docker.reference.type:   attestation-manifest
+```
+
 ## 2. Signature check with cosign
 
 > Checks that the image was built and signed by Docker's `github-builder`
@@ -28,14 +61,24 @@ Output equals `RECORDED_DIGEST` → pass. Mismatch → the tag was re-pointed;
 > log — so a forged Release body or a compromised registry cannot fool you.
 
 Requires [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/).
-Verify against the digest, not the tag (tags are mutable):
+The signatures live on the per-platform **attestation manifests**, not on the
+index — so verify against each `ATTESTATION_DIGEST` (the `attestation-manifest`
+entries you read out of the index in §1), never the tag and never the index
+digest.
+
+Fetch the attestation manifest hashes from the §1 output.
+
+**Example for v0.1.3**
+
+1. linux/amd64: `sha256:14f411bc6c840e81fb4f517f33f36d467c409582193b5f865cc44048465bbd8f`
+2. linux/arm64: `sha256:2c3618855dde6994cba746cadca53d8f249cad27d7d0f763cceaeee8285918f4`
 
 ```bash
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github.com/docker/github-builder/.github/workflows/build.yml.*$' \
   --certificate-github-workflow-repository gnosischain/bridge-validator \
-  gnosischain/bridge-validator@sha256:<RECORDED_DIGEST>
+  gnosischain/bridge-validator@sha256:<ATTESTATION_DIGEST>
 ```
 
 Success prints the verified claims and the signing certificate's identity.
@@ -45,6 +88,27 @@ by `github-builder` _invoked from this repo_.
 
 Note: only releases built by the github-builder pipeline are signed; older
 tags (v0.1.1 or less) fail with "no matching signatures".
+
+**Example output for v0.1.3** (linux/amd64 attestation)
+
+```bash
+% cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/docker/github-builder/.github/workflows/build.yml.*$' \
+  --certificate-github-workflow-repository gnosischain/bridge-validator \
+  gnosischain/bridge-validator@sha256:14f411bc6c840e81fb4f517f33f36d467c409582193b5f865cc44048465bbd8f
+
+Verification for index.docker.io/gnosischain/bridge-validator@sha256:14f411bc6c840e81fb4f517f33f36d467c409582193b5f865cc44048465bbd8f --
+The following checks were performed on each of these signatures:
+  - The cosign claims were validated
+  - Existence of the claims in the transparency log was verified offline
+  - The code-signing certificate was verified using trusted certificate authority certificates
+
+[{"critical":{"identity":{"docker-reference":"index.docker.io/gnosischain/bridge-validator@sha256:14f411bc6c840e81fb4f517f33f36d467c409582193b5f865cc44048465bbd8f"},"image":{"docker-manifest-digest":"sha256:14f411bc6c840e81fb4f517f33f36d467c409582193b5f865cc44048465bbd8f"},"type":"https://sigstore.dev/cosign/sign/v1"},"optional":{}}]
+```
+
+Repeat with the `linux/arm64` attestation digest (`sha256:2c3618…`); it prints
+the same three checks and a matching claims block for that digest.
 
 ## 3. Full audit: rebuild from source
 
