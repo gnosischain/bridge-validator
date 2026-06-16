@@ -26,10 +26,11 @@ EXPECTED_SOURCE_COMMIT=<commit the tag must resolve to, obtained out-of-band>
 SOURCE_REPO=https://github.com/gnosischain/bridge-validator
 ```
 
-| Variable           | What it is                               | Source                            |
-| ------------------ | ---------------------------------------- | --------------------------------- |
-| `$RECORDED_DIGEST` | index digest CI recorded for the release | release **Published image** block |
-| `$LIVE_DIGEST`     | index digest the registry serves now     | `imagetools inspect`              |
+| Variable              | What it is                                        | Source                            |
+| --------------------- | ------------------------------------------------- | --------------------------------- |
+| `$RECORDED_DIGEST`    | index digest CI recorded for the release          | release **Published image** block |
+| `$LIVE_DIGEST`        | index digest the registry serves now              | `imagetools inspect`              |
+| `$ATTESTATION_DIGEST` | per-platform attestation-manifest digest (signed) | `imagetools inspect` (index)      |
 
 ## What the checks do NOT prove
 
@@ -82,8 +83,12 @@ signature proves the digest was produced by that workflow running on GitHub
 Actions in _this repository_, with the trust anchor in the public Sigstore
 transparency log.
 
-Command: [`HOW_TO_VERIFY.md` §2](./HOW_TO_VERIFY.md). Verify against
-`$RECORDED_DIGEST`, never the tag.
+Command and example output: [`HOW_TO_VERIFY.md` §2](./HOW_TO_VERIFY.md). The
+signatures live on the per-platform **attestation manifests**, not on the index
+— so verify against each `$ATTESTATION_DIGEST` (the `attestation-manifest`
+entries you read out of the index with `imagetools inspect`), never the tag and
+never `$RECORDED_DIGEST` (that index digest only tells you _which_ index to
+enumerate the attestation manifests from).
 
 **Trust:** the certificate identity is the _reusable_ workflow
 (`docker/github-builder/.github/workflows/build.yml@...`), which any repository
