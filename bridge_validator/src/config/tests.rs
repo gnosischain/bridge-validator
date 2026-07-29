@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
+    use crate::config::{BlockProcessingMode, Config};
 
     // Serializes tests that mutate process-global env vars to prevent races.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -212,6 +212,148 @@ mod tests {
         // Private keys should be None when not set
         assert!(config.xdai_validator_private_key.is_none());
         assert!(config.amb_validator_private_key.is_none());
+    }
+
+    /// Sets the env vars every `from_env` test needs and clears the two mode
+    /// vars so a leaked value from a previous test can't decide the outcome.
+    fn set_base_env() {
+        std::env::remove_var("POLL_INTERVAL_SECS");
+        std::env::remove_var("MAX_RETRY_COUNT");
+        std::env::remove_var("ETH_BLOCK_PROCESSING_MODE");
+        std::env::remove_var("GC_BLOCK_PROCESSING_MODE");
+
+        std::env::set_var("ETH_RPC", "https://eth.example.com");
+        std::env::set_var("GC_RPC", "https://gc.example.com");
+        std::env::set_var("ETH_BC_RPC", "https://eth-beacon.example.com");
+        std::env::set_var("GC_BC_RPC", "https://gc-beacon.example.com");
+    }
+
+    // Existing deployments set neither mode var and must keep the conservative
+    // finalized-only behaviour.
+    #[test]
+    fn test_block_processing_mode_defaults_to_block_finality() {
+        let _lock = env_lock();
+        set_base_env();
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(
+            config.eth_block_processing_mode,
+            BlockProcessingMode::BlockFinality
+        );
+        assert_eq!(
+            config.gc_block_processing_mode,
+            BlockProcessingMode::BlockFinality
+        );
+        assert!(config.fcr_chains().is_empty());
+    }
+
+    #[test]
+    fn test_block_processing_mode_is_per_chain() {
+        let _lock = env_lock();
+        set_base_env();
+        std::env::set_var("ETH_BLOCK_PROCESSING_MODE", "fcr");
+        std::env::set_var("GC_BLOCK_PROCESSING_MODE", "block-finality");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.mode_for_chain("eth"), BlockProcessingMode::Fcr);
+        assert_eq!(
+            config.mode_for_chain("gc"),
+            BlockProcessingMode::BlockFinality
+        );
+
+        // Only the fcr chain is handed to the checker, with its EL RPC array.
+        let fcr_chains = config.fcr_chains();
+        assert_eq!(fcr_chains.len(), 1);
+        assert_eq!(fcr_chains[0].0, "eth");
+        assert_eq!(fcr_chains[0].1, ["https://eth.example.com"]);
+
+        std::env::remove_var("ETH_BLOCK_PROCESSING_MODE");
+        std::env::remove_var("GC_BLOCK_PROCESSING_MODE");
+    }
+
+    #[test]
+    fn test_block_processing_mode_parsing_is_case_insensitive() {
+        let _lock = env_lock();
+        set_base_env();
+        std::env::set_var("ETH_BLOCK_PROCESSING_MODE", " FCR ");
+        std::env::set_var("GC_BLOCK_PROCESSING_MODE", "Block-Finality");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.eth_block_processing_mode, BlockProcessingMode::Fcr);
+        assert_eq!(
+            config.gc_block_processing_mode,
+            BlockProcessingMode::BlockFinality
+        );
+
+        std::env::remove_var("ETH_BLOCK_PROCESSING_MODE");
+        std::env::remove_var("GC_BLOCK_PROCESSING_MODE");
+    }
+
+    // A typo must not quietly hand back block-finality: the operator would
+    // believe fcr is on and never find out.
+    #[test]
+    fn test_invalid_block_processing_mode_is_rejected() {
+        let _lock = env_lock();
+        set_base_env();
+        std::env::set_var("ETH_BLOCK_PROCESSING_MODE", "fast");
+
+        let result = Config::from_env();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("ETH_BLOCK_PROCESSING_MODE"), "got: {}", err);
+
+        std::env::remove_var("ETH_BLOCK_PROCESSING_MODE");
+    }
+
+    // An empty value is the same as not setting the var (the .env.example
+    // ships the key with no value).
+    #[test]
+    fn test_empty_block_processing_mode_uses_default() {
+        let _lock = env_lock();
+        set_base_env();
+        std::env::set_var("ETH_BLOCK_PROCESSING_MODE", "");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(
+            config.eth_block_processing_mode,
+            BlockProcessingMode::BlockFinality
+        );
+
+        std::env::remove_var("ETH_BLOCK_PROCESSING_MODE");
+    }
+
+    #[test]
+    fn test_bridge_modes_for_chain() {
+        assert_eq!(
+            Config::bridge_modes_for_chain("eth"),
+            ["AMB_ETH", "XDAI_ETH"]
+        );
+        assert_eq!(Config::bridge_modes_for_chain("gc"), ["AMB_GC", "XDAI_GC"]);
+    }
+
+    #[test]
+    fn test_set_mode_for_chain_downgrades_only_that_chain() {
+        let _lock = env_lock();
+        set_base_env();
+        std::env::set_var("ETH_BLOCK_PROCESSING_MODE", "fcr");
+        std::env::set_var("GC_BLOCK_PROCESSING_MODE", "fcr");
+
+        let mut config = Config::from_env().unwrap();
+        config.set_mode_for_chain("eth", BlockProcessingMode::BlockFinality);
+
+        assert_eq!(
+            config.mode_for_chain("eth"),
+            BlockProcessingMode::BlockFinality
+        );
+        assert_eq!(config.mode_for_chain("gc"), BlockProcessingMode::Fcr);
+
+        std::env::remove_var("ETH_BLOCK_PROCESSING_MODE");
+        std::env::remove_var("GC_BLOCK_PROCESSING_MODE");
     }
 
     #[test]

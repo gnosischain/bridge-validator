@@ -64,9 +64,10 @@ flowchart TB
 
 ### Data Flow
 
-1. **Event Indexers** poll bridge contracts for new events at a configurable interval and persist raw event logs to PostgreSQL. Each indexer only reads up to the latest **finalized** block, so a stored log is guaranteed to be part of the canonical chain and cannot be reverted by a reorg.
-2. **Message Processors** atomically claim unprocessed rows (using `FOR UPDATE SKIP LOCKED` to avoid contention), decode the event, sign it if required, and forward the result through an in-memory channel. They do not re-check finality — every stored row is already finalized by construction (see the indexer below).
+1. **Event Indexers** poll bridge contracts for new events at a configurable interval and persist raw event logs to PostgreSQL. In the default `block-finality` mode each indexer only reads up to the latest **finalized** block, so a stored log is guaranteed to be part of the canonical chain and cannot be reverted by a reorg. In `fcr` mode the bound is the **safe** block instead (see [Block processing modes](#block-processing-modes)).
+2. **Message Processors** atomically claim unprocessed rows (using `FOR UPDATE SKIP LOCKED` to avoid contention), decode the event, sign it if required, and forward the result through an in-memory channel. They do not re-check finality — in `block-finality` mode every stored row is already finalized by construction (see the indexer below).
 3. **On-Chain Sender** receives signed messages, performs pre-flight duplicate checks against the bridge contract, and submits the transaction. On success, the event row is deleted; on failure, the retry count is incremented.
+4. **FCR Checker** (only when at least one chain runs in `fcr` mode) re-checks every safe-processed block once it finalizes and records a false positive if the block did not survive.
 
 ## Components
 
@@ -81,13 +82,51 @@ Polls a specific bridge contract on a specific chain for a specific event type. 
 | `ETHXdai` | Ethereum     | xDai   | `UserRequestForAffirmation(address,uint256,bytes32)`       |
 | `GCXdai`  | Gnosis Chain | xDai   | `UserRequestForSignature(address,uint256,bytes32,address)` |
 
-Each indexer tracks its `last_processed_block` in memory and, on each poll cycle, resolves the latest finalized block through the shared finality source (`service/finality.rs` — beacon chain RPC first, execution-layer `eth_getBlockByNumber("finalized")` as fallback) and only queries logs in the range `(last_processed_block, finalized_block]`. Because the cursor advances to the finalized block rather than the chain tip, blocks between finality and the tip are revisited on a later cycle once they finalize — they are never skipped. Indexing only finalized blocks closes the reorg window: an attacker cannot get a bridge event signed off a block that is later orphaned from the canonical chain.
+Each indexer tracks its `last_processed_block` in memory and, on each poll cycle, resolves the upper bound block for its chain and only queries logs in the range `(last_processed_block, upper_bound_block]`. Because the cursor advances to that bound rather than the chain tip, blocks between it and the tip are revisited on a later cycle — they are never skipped.
+
+In the default `block-finality` mode the bound is the latest finalized block, resolved through the shared finality source (`service/finality.rs` — beacon chain RPC first, execution-layer `eth_getBlockByNumber("finalized")` as fallback). Indexing only finalized blocks closes the reorg window: an attacker cannot get a bridge event signed off a block that is later orphaned from the canonical chain.
+
+### Block processing modes
+
+The upper bound is selectable **per chain** via `ETH_BLOCK_PROCESSING_MODE` / `GC_BLOCK_PROCESSING_MODE`. All indexers on a chain share its mode. The default is `block-finality` everywhere, so no existing deployment changes behaviour without an explicit opt-in.
+
+| Mode                        | Upper bound                                     | Latency | Guarantee                                                                    |
+| --------------------------- | ----------------------------------------------- | ------- | ---------------------------------------------------------------------------- |
+| `block-finality` (default)  | latest **finalized** block                       | ~12.8m  | Economic finality — a stored row can never leave the canonical chain          |
+| `fcr`                       | latest **safe** (fast-confirmed) block           | ~12s    | Conditional (honest-majority, no slashing backing) — a safe block **can** be reorged out |
+
+`fcr` mode resolves the bound with `eth_getBlockByNumber("safe", false)` (`service/safe.rs`). This lookup is **execution-layer only**: there is no Beacon API `safe` block id on any client, and an EL block hash must never be compared against a beacon block root.
+
+**Guarantee downgrade.** `fcr` mode deliberately opens a reorg window in the signing path — the validator signs messages from blocks that are fast-confirmed but not yet final. A signature cannot be un-signed, so this is an explicit, per-chain operator choice, appropriate for the same reasoning that applies to bridge transfers generally (fast, conditional) rather than to irreversible high-value settlement.
+
+**Safe-support preflight.** Unlike `finalized`, the `safe` tag is not universally supported. At startup each fcr-configured chain probes its EL RPC array once and classifies every provider:
+
+- a valid block → the provider supports `safe`;
+- a JSON-RPC **error** object (e.g. `-32602 invalid argument`, unsupported tag) → the provider **cannot** serve `safe`; logged at `error!`;
+- `result: null` **without** an error object → the tag was accepted but there is no safe block yet (FCR off, node syncing, pre-merge) — a legitimate empty that falls back to `finalized` quietly.
+
+If no reachable provider can serve `safe`, the chain is downgraded to `block-finality` at boot with a loud `error!` rather than silently running conservative for the process lifetime. If nothing was reachable at all, fcr stays on (treated as a transient outage) and each cycle falls back to `finalized` until a provider answers.
+
+**Fallback at runtime.** If `safe` cannot be resolved during a poll cycle, the indexer falls back to `finalized` for that cycle and logs it prominently.
+
+### FCR Checker (`service/fcr_checker.rs`)
+
+Runs only when at least one chain is in `fcr` mode (otherwise it logs "not required" and exits immediately). Every cycle, per fcr chain, it:
+
+1. resolves the latest finalized block through `service/finality.rs`;
+2. selects the distinct `(block_number, block_hash)` pairs of rows still marked `fcr_status = 'pending'` at or below that block (one RPC call per block, not per event);
+3. fetches the canonical block at each of those **numbers** and compares hashes:
+   - **match** → rows become `confirmed`;
+   - **hash differs** → a different block occupies that number, so the safe block was reorged out: every affected row is written to `fcr_false_positives`, an `error!` is logged, and the rows become `reverted`. Nothing is undone on-chain;
+   - **block not returned** → left `pending` and retried next cycle. Rows are never pruned, because a dropped row would be indistinguishable from a verified one.
+
+The check anchors on block **number** and compares hashes because bridge-validator works entirely in execution-layer block numbers, which are contiguous — an orphaned block manifests as a *different block at the same number*, not as a gap. A growing `pending` backlog is warned on: it means signed messages are outrunning finality.
 
 ### Message Processor (`service/msg_processor.rs`)
 
 Two concurrent instances process events from the database:
 
-- **No finality check**: Finality is enforced solely by the indexer, which only stores logs from finalized blocks. The processor therefore performs no finality lookup of its own — claiming a row implies the event is already final and part of the canonical chain.
+- **No finality check**: The processor performs no finality lookup of its own; it signs whatever is unprocessed. In `block-finality` mode claiming a row implies the event is already final and part of the canonical chain. In `fcr` mode that invariant is relaxed by design — the row was safe, not final, when it was claimed, and the FCR checker adjudicates it after the fact.
 - **Message signing**: For `GC -> ETH` flows (`AMB_GC`, `XDAI_GC`), the processor signs the message with the corresponding validator private key.
 - **Concurrency safety**: Uses a SQL transaction with `FOR UPDATE SKIP LOCKED` to ensure two processors never claim the same row.
 
@@ -153,6 +192,8 @@ cp .env.example .env
 | `GC_XDAI_BRIDGE_ADDRESS`          | No       | `0x7301CFA0e1756B71869E93d4e4Dca5c7d0eb0AA6` | xDai bridge contract on Gnosis Chain.                                                                                         |
 | `XDAI_BRIDGE_HELPER_ADDRESS`      | No       | `0xe30269bc61E677cD60aD163a221e464B7022fbf5` | xDai bridge helper for signature aggregation.                                                                                 |
 | `AMB_BRIDGE_HELPER_ADDRESS`       | No       | `0x7d94ece17e81355326e3359115D4B02411825EdD` | AMB bridge helper for signature aggregation.                                                                                  |
+| `ETH_BLOCK_PROCESSING_MODE`       | No       | `block-finality`                             | `fcr` \| `block-finality` — upper bound for the ETH-side indexers. See [Block processing modes](#block-processing-modes).      |
+| `GC_BLOCK_PROCESSING_MODE`        | No       | `block-finality`                             | `fcr` \| `block-finality` — upper bound for the GC-side indexers. See [Block processing modes](#block-processing-modes).       |
 | `POLL_INTERVAL_SECS`              | No       | `10`                                         | Seconds between each event-indexer poll cycle.                                                                                |
 | `MAX_RETRY_COUNT`                 | No       | `5`                                          | Maximum retry attempts before an event is dropped.                                                                            |
 | `XDAI_EXECUTE_MESSAGE_ON_FOREIGN` | No       | `false`                                      | Set to `true` to also execute xDai messages on the foreign chain (ETH) after submitting the signature on the home chain (GC). |
@@ -234,7 +275,8 @@ The Dockerfile uses a multi-stage build:
 
 ## Database Schema
 
-Migrations run automatically on startup via `sqlx::migrate!`. The database has a single table:
+Migrations run automatically on startup via `sqlx::migrate!`. The database has two tables:
+`event_logs` (the processing queue) and `fcr_false_positives` (the FCR audit trail).
 
 ### `event_logs`
 
@@ -245,18 +287,41 @@ Migrations run automatically on startup via `sqlx::migrate!`. The database has a
 | `bridge_mode`      | `TEXT NOT NULL`       | One of: `AMB_ETH`, `AMB_GC`, `XDAI_ETH`, `XDAI_GC`.                                  |
 | `log_data`         | `JSONB NOT NULL`      | Full serialized `alloy::Log` object.                                                 |
 | `block_number`     | `BIGINT`              | Block number where the event was emitted.                                            |
+| `block_hash`       | `TEXT`                | Execution-layer hash of that block, used by the FCR checker's revalidation.          |
 | `transaction_hash` | `TEXT`                | Transaction hash of the event.                                                       |
 | `log_index`        | `BIGINT`              | Index of the log within its block (uniquely identifies a log alongside the tx hash). |
 | `is_processed`     | `TEXT`                | `"true"` or `"false"` — whether a processor has claimed this row.                    |
 | `retry_count`      | `INT DEFAULT 0`       | Number of failed processing attempts.                                                |
 | `stage`            | `TEXT DEFAULT 'home'` | Processing phase: `home` (submit signature) or `foreign` (execute on foreign chain). |
+| `fcr_status`       | `TEXT`                | `NULL` in block-finality mode; `pending` → `confirmed` \| `reverted` in fcr mode.     |
 | `created_at`       | `TIMESTAMP`           | Row creation time.                                                                   |
 
 **Unique constraint**: `(transaction_hash, log_index)` prevents duplicate event insertion while
 keeping distinct logs apart — a single transaction can emit several events of the same type, which
 share a `topic_key` but each have a unique `log_index`.
 
-**Indexes**: `topic_key`, `bridge_mode`, `block_number`, `transaction_hash`, `log_index`.
+**Indexes**: `topic_key`, `bridge_mode`, `block_number`, `transaction_hash`, `log_index`, plus a
+partial index on `block_number WHERE fcr_status = 'pending'` for the FCR checker's hot query
+(block-finality deployments pay nothing for it).
+
+### `fcr_false_positives`
+
+Durable audit trail of safe-block confirmations that did not survive finalization — one row per
+affected event log, so an alert can be traced back to the exact signed message. Written only in
+`fcr` mode, alongside a `tracing::error!`.
+
+| Column                  | Type                 | Description                                                    |
+| ----------------------- | -------------------- | -------------------------------------------------------------- |
+| `id`                    | `SERIAL PRIMARY KEY` | Auto-increment row ID.                                         |
+| `chain`                 | `TEXT NOT NULL`      | `eth` or `gc`.                                                 |
+| `block_number`          | `BIGINT NOT NULL`    | Block number that was processed as safe.                       |
+| `stored_block_hash`     | `TEXT NOT NULL`      | Hash recorded when the block was safe.                         |
+| `canonical_block_hash`  | `TEXT`               | Hash of the block that actually finalized at that number.      |
+| `transaction_hash`      | `TEXT`               | Transaction hash of the affected event.                        |
+| `log_index`             | `BIGINT`             | Log index of the affected event.                               |
+| `event_log_id`          | `INT`                | `event_logs.id` of the affected row.                           |
+| `detected_at_finalized` | `BIGINT`             | Finalized block at which the mismatch was detected.            |
+| `created_at`            | `TIMESTAMP`          | Row creation time.                                             |
 
 ## Bridge Modes
 

@@ -15,7 +15,7 @@ use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
 use common::setup_test_db;
 use tokio::sync::{mpsc, watch};
-use worker::config::Config;
+use worker::config::{BlockProcessingMode, Config};
 use worker::contracts::{AMB_BRIDGE, XDAI_BRIDGE};
 use worker::service::msg_processor::{EventLogRow, MessageProcessor, SenderData};
 
@@ -39,6 +39,8 @@ fn create_test_config() -> Config {
         amb_bridge_helper_address: address!("0x7d94ece17e81355326e3359115D4B02411825EdD"),
         poll_interval_secs: 10,
         max_retry_count: 5,
+        eth_block_processing_mode: BlockProcessingMode::BlockFinality,
+        gc_block_processing_mode: BlockProcessingMode::BlockFinality,
     }
 }
 
@@ -66,6 +68,8 @@ fn create_test_config_with_keys() -> Config {
         amb_bridge_helper_address: address!("0x7d94ece17e81355326e3359115D4B02411825EdD"),
         poll_interval_secs: 10,
         max_retry_count: 5,
+        eth_block_processing_mode: BlockProcessingMode::BlockFinality,
+        gc_block_processing_mode: BlockProcessingMode::BlockFinality,
     }
 }
 

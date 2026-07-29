@@ -8,6 +8,7 @@ use crate::contracts::OnChainCallData;
 use crate::error::BridgeValidatorError;
 use crate::rpc_provider::setup_provider;
 use crate::service::event_indexer::EventIndexer;
+use crate::service::fcr_checker::FcrChecker;
 use crate::service::msg_processor::{MessageProcessor, SenderData};
 use crate::service::on_chain_sender::OnChainSender;
 
@@ -26,7 +27,15 @@ async fn main() -> Result<(), BridgeValidatorError> {
         .init();
 
     dotenv::dotenv().ok();
-    let config = Config::from_env().map_err(BridgeValidatorError::Config)?;
+    let mut config = Config::from_env().map_err(BridgeValidatorError::Config)?;
+
+    // Verify at boot that every chain configured for fcr can actually be
+    // served `safe` by its RPC array. A safe-incapable RPC would otherwise
+    // degrade that chain to finality for the whole process lifetime while the
+    // operator believes they have ~12s confirmation. Chains that fail are
+    // downgraded explicitly and loudly here.
+    crate::service::safe::run_fcr_preflight(&mut config, &reqwest::Client::new()).await;
+    let config = config;
 
     // Initialize database connection pool
     let database_url =
@@ -136,6 +145,10 @@ async fn main() -> Result<(), BridgeValidatorError> {
 
     let on_chain_sender = OnChainSender::new(config.clone(), pool.clone(), rx);
 
+    // Re-checks every safe-processed block once it finalizes. Exits immediately
+    // when no chain is in fcr mode.
+    let fcr_checker = FcrChecker::new(config.clone(), pool.clone(), shutdown_rx.clone());
+
     // Drop the original sender so the channel closes once both MessageProcessors stop.
     // OnChainSender will drain remaining messages, then exit.
     drop(tx);
@@ -147,7 +160,8 @@ async fn main() -> Result<(), BridgeValidatorError> {
         indexer_gc_xdai.start(),
         msg_processor_1.start(),
         msg_processor_2.start(),
-        on_chain_sender.start()
+        on_chain_sender.start(),
+        fcr_checker.start()
     );
 
     tracing::info!("All services stopped, shutting down");

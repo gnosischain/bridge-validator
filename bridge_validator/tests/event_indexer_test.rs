@@ -10,7 +10,7 @@ use alloy::primitives::address;
 use alloy::transports::mock::Asserter;
 use common::{create_mock_provider, create_test_log_with_address_and_topic, setup_test_db};
 use tokio::sync::watch;
-use worker::config::Config;
+use worker::config::{BlockProcessingMode, Config};
 use worker::service::event_indexer::EventIndexer;
 
 // Helper function to create test config
@@ -33,6 +33,8 @@ fn create_test_config() -> Config {
         amb_bridge_helper_address: address!("0x7d94ece17e81355326e3359115D4B02411825EdD"),
         poll_interval_secs: 10,
         max_retry_count: 5,
+        eth_block_processing_mode: BlockProcessingMode::BlockFinality,
+        gc_block_processing_mode: BlockProcessingMode::BlockFinality,
     }
 }
 
@@ -352,3 +354,155 @@ async fn test_multiple_events_same_tx_same_topic() {
         .unwrap();
 }
 
+// ============================================================================
+// FCR mode
+// ============================================================================
+
+/// In fcr mode a row is indexed from a `safe` block that can still be reorged
+/// out, so it must enter the revalidation lifecycle: `fcr_status = 'pending'`
+/// plus the block hash the checker will compare against later.
+#[tokio::test]
+async fn test_fcr_mode_marks_rows_pending_with_block_hash() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let mut config = create_test_config();
+    config.eth_block_processing_mode = BlockProcessingMode::Fcr;
+
+    let block_number = 99900001u64;
+    let log = create_test_log_with_address_and_topic(
+        block_number,
+        "0xc111111111111111111111111111111111111111111111111111111111111111",
+        config.eth_amb_bridge_address,
+        [0x55u8; 32],
+        0,
+    );
+
+    let (provider, asserter): (_, Asserter) = create_mock_provider();
+    asserter.push_success(&vec![log]);
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let indexer = EventIndexer::new(
+        config.clone(),
+        provider,
+        "eth".to_string(),
+        "UserRequestForAffirmation".to_string(),
+        config.eth_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx,
+    );
+
+    indexer
+        .poll_events(0, block_number)
+        .await
+        .expect("polling should succeed");
+
+    let rows: Vec<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT fcr_status, block_hash FROM event_logs WHERE block_number = $1")
+            .bind(block_number as i64)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0.as_deref(), Some("pending"));
+    assert_eq!(
+        rows[0].1.as_deref(),
+        Some("0x0000000000000000000000000000000000000000000000000000000000000001")
+    );
+
+    sqlx::query("DELETE FROM event_logs WHERE block_number = $1")
+        .bind(block_number as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// block-finality rows are final by construction, so they carry no fcr status
+/// — the checker must have nothing to adjudicate. The block hash is still
+/// recorded (it costs nothing and keeps a later mode switch coherent).
+#[tokio::test]
+async fn test_block_finality_mode_leaves_fcr_status_null() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let config = create_test_config();
+
+    let block_number = 99900002u64;
+    let log = create_test_log_with_address_and_topic(
+        block_number,
+        "0xc222222222222222222222222222222222222222222222222222222222222222",
+        config.eth_amb_bridge_address,
+        [0x66u8; 32],
+        0,
+    );
+
+    let (provider, asserter): (_, Asserter) = create_mock_provider();
+    asserter.push_success(&vec![log]);
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let indexer = EventIndexer::new(
+        config.clone(),
+        provider,
+        "eth".to_string(),
+        "UserRequestForAffirmation".to_string(),
+        config.eth_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx,
+    );
+
+    indexer
+        .poll_events(0, block_number)
+        .await
+        .expect("polling should succeed");
+
+    let rows: Vec<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT fcr_status, block_hash FROM event_logs WHERE block_number = $1")
+            .bind(block_number as i64)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, None, "block-finality rows carry no fcr status");
+    assert!(rows[0].1.is_some());
+
+    sqlx::query("DELETE FROM event_logs WHERE block_number = $1")
+        .bind(block_number as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// The mode is per chain: a GC indexer on an fcr-configured GC chain must not
+/// inherit the ETH chain's mode, and vice versa.
+#[tokio::test]
+async fn test_indexer_mode_follows_its_own_chain() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let mut config = create_test_config();
+    config.gc_block_processing_mode = BlockProcessingMode::Fcr;
+
+    let (eth_provider, _eth_asserter): (_, Asserter) = create_mock_provider();
+    let (gc_provider, _gc_asserter): (_, Asserter) = create_mock_provider();
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let eth_indexer = EventIndexer::new(
+        config.clone(),
+        eth_provider,
+        "eth".to_string(),
+        "UserRequestForAffirmation".to_string(),
+        config.eth_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx.clone(),
+    );
+    let gc_indexer = EventIndexer::new(
+        config.clone(),
+        gc_provider,
+        "gc".to_string(),
+        "UserRequestForSignature".to_string(),
+        config.gc_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx,
+    );
+
+    assert_eq!(eth_indexer.chain(), "eth");
+    assert_eq!(gc_indexer.chain(), "gc");
+    assert_eq!(eth_indexer.mode(), BlockProcessingMode::BlockFinality);
+    assert_eq!(gc_indexer.mode(), BlockProcessingMode::Fcr);
+}
