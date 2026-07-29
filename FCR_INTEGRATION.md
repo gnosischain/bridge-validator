@@ -5,7 +5,7 @@ Implementation plan for porting **FCR (Fast Confirmation Rule)**. Conceptual bac
 
 > Status: **implemented** (phases 1–4). `block-finality` stays the default so existing
 > deployments are unaffected. See [Implementation notes](#implementation-notes) for where each
-> piece landed and the two places the code deviates from the plan below.
+> piece landed.
 
 ## Scope
 
@@ -68,18 +68,25 @@ occupying the same number** — caught directly by anchor-on-number-then-compare
   `'pending'` | `'confirmed'` | `'reverted'` for fcr rows.
 - `CREATE INDEX idx_fcr_pending ON event_logs(block_number) WHERE fcr_status = 'pending';`
   — partial index for the checker's hot query.
-- `CREATE TABLE fcr_false_positives ( id SERIAL PRIMARY KEY, chain TEXT NOT NULL,
+- `CREATE TABLE IF NOT EXISTS fcr_false_positives ( id SERIAL PRIMARY KEY, chain TEXT NOT NULL,
 block_number BIGINT NOT NULL, stored_block_hash TEXT NOT NULL, canonical_block_hash TEXT,
 transaction_hash TEXT, log_index BIGINT, event_log_id INT, detected_at_finalized BIGINT,
 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP );`
+- Two lookup indexes on the audit table: `idx_fcr_false_positives_chain(chain)` and
+  `idx_fcr_false_positives_block_number(block_number)`.
 
 ### 2. `config/mod.rs`
 
 - Add `enum BlockProcessingMode { Fcr, BlockFinality }` (default `BlockFinality`).
 - Add fields `eth_block_processing_mode` / `gc_block_processing_mode`, parsed from
-  `ETH_BLOCK_PROCESSING_MODE` / `GC_BLOCK_PROCESSING_MODE`.
+  `ETH_BLOCK_PROCESSING_MODE` / `GC_BLOCK_PROCESSING_MODE`. An unrecognised value is a **hard
+  startup error**, never a silent default — a typo'd mode var must not quietly hand back the
+  conservative mode an operator believes they turned off.
 - Helpers: `mode_for_chain(&self, chain: &str) -> BlockProcessingMode` and
-  `fcr_chains(&self) -> Vec<(&str /*chain*/, &[String] /*el_rpcs*/)>`.
+  `fcr_chains(&self) -> Vec<(&str /*chain*/, &[String] /*el_rpcs*/)>`, plus
+  `set_mode_for_chain` (how the §3a preflight applies a downgrade),
+  `finality_rpcs_for_chain` (beacon + EL fallbacks for a chain) and
+  `bridge_modes_for_chain` (the `event_logs.bridge_mode` values a chain owns).
 
 ### 3. `service/finality.rs` (or sibling `safe.rs`)
 
@@ -97,25 +104,33 @@ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP );`
 `safe` is **not universally supported**: some EL providers reject the `safe` tag outright, and even
 supporting nodes legitimately return `null` when there is no safe block yet (FCR disabled, node still
 syncing, or pre-merge). These two cases must not be conflated — the existing finalized resolver never
-had to make this distinction because `finalized` is universal, but `safe` does.
+had to make the distinction because `finalized` is universal; `safe` is not.
 
 On startup, for **each chain configured in `fcr` mode**, probe its EL RPC array once with
 `eth_getBlockByNumber("safe", false)` and classify the outcome per provider:
 
-- **Valid block object returned** → provider supports `safe`. Good.
-- **JSON-RPC error / HTTP error / `safe` tag rejected** (e.g. `-32602 invalid argument`, method/param
-  errors, unsupported-tag messages) → **provider cannot serve `safe`**. This is a **misconfiguration**,
-  not a transient miss. Log at `error!` and fail the chain's fcr preflight (do not silently downgrade —
-  see Risks). If the RPC array has other providers that _do_ support `safe`, the array can still run;
-  flag the bad provider so a later silent fallback isn't mistaken for "chain caught up".
-- **`result: null`** (tag accepted, no safe block available yet) → **legitimate empty**, treat as
-  `None` and let the fresh-start guard fall back to finalized. Distinguish
-  this from the error case above by the _presence of a JSON-RPC error object_, not by null-ness alone.
+- **Valid block object returned** → `SafeProbe::Block`: provider supports `safe`. Good.
+- **JSON-RPC `error` object / `safe` tag rejected** (e.g. `-32602 invalid argument`, unsupported-tag
+  messages) → `SafeProbe::Unsupported`: this provider **cannot serve `safe`**. A **misconfiguration**,
+  not a transient miss — log at `error!`. If the RPC array has other providers that _do_ support
+  `safe`, the array can still run; flag the bad provider so a later silent fallback isn't mistaken
+  for "chain caught up".
+- **`result: null`** (tag accepted, no safe block available yet) → `SafeProbe::Empty`: **legitimate
+  empty**, treat as `None` and let the fresh-start guard fall back to finalized. Distinguish this
+  from the error case above by the _presence of a JSON-RPC error object_, not by null-ness alone.
+- **HTTP error / connection failure / unparseable body** → `SafeProbe::Unreachable`. An HTTP-level
+  rejection carries no JSON-RPC error object, so it says **nothing** about `safe` support and must
+  not be counted as "unsupported".
+
+Per-chain verdict (`ChainSafeSupport::keeps_fcr`): downgrade the chain to `block-finality` — loudly,
+at `error!` — only when providers **answered** and none of them would serve `safe`. If nothing was
+reachable at all, keep fcr enabled and log at `error!`: an RPC outage at boot is transient, and the
+per-cycle §4 fallback already covers it. Pinning a chain to finality for the whole process lifetime
+because the network blipped during startup is the worse failure.
 
 Rationale: without this preflight, an fcr-configured chain pointed at a `safe`-incapable RPC would
 silently run on `finalized` forever (the §4 fallback), giving operators finality latency while they
 believe they have ~12s confirmation. The check surfaces that at boot instead of never.
-Fallback to block finality if safe is not supported
 
 ### 4. `service/event_indexer.rs`
 
@@ -134,12 +149,19 @@ Fallback to block finality if safe is not supported
 - Per cycle, per fcr chain:
   1. resolve `finalized` via `finality.rs`,
   2. `SELECT DISTINCT block_number, block_hash FROM event_logs WHERE bridge_mode IN (<chain modes>)
-AND fcr_status = 'pending' AND block_number <= finalized`,
+AND fcr_status = 'pending' AND block_number IS NOT NULL AND block_hash IS NOT NULL
+AND block_number <= finalized`,
   3. one `getBlock(number)` per distinct block, then compare:
      - **match** → `UPDATE ... SET fcr_status = 'confirmed'` for that `(number, hash)`.
      - **mismatch** → insert affected rows into `fcr_false_positives`, `tracing::error!(...)`, then
-       `UPDATE ... SET fcr_status = 'reverted'`.
+       `UPDATE ... SET fcr_status = 'reverted'`. Both go in **one transaction**, so an alert can
+       never be lost while the rows are quietly marked resolved.
      - **`getBlock` null** → skip, retry next cycle (never prune — dropping would read as verified).
+- Pending rows with a NULL `block_hash` are **never adjudicated** — hence the `IS NOT NULL` guards
+  above. They can't be compared against anything, so the checker counts them separately and logs at
+  `error!`. The indexer always records a hash in fcr mode, so this state is an indexer bug rather
+  than a normal one: confirming such a row would be a fabricated verdict, reverting it a fabricated
+  alert.
 - Backlog warn on the count of `pending` rows (`PENDING_BACKLOG_WARN_THRESHOLD`).
 
 ### 6. `main.rs`
@@ -159,17 +181,43 @@ AND fcr_status = 'pending' AND block_number <= finalized`,
 | `ETH_BLOCK_PROCESSING_MODE` | `fcr` \| `block-finality` | `block-finality` | ETH-side indexers' upper bound. |
 | `GC_BLOCK_PROCESSING_MODE`  | `fcr` \| `block-finality` | `block-finality` | GC-side indexers' upper bound.  |
 
+`block_finality` (underscore) is accepted as a spelling of `block-finality`, and an empty value means
+"unset". Anything else fails startup rather than defaulting.
+
 ## Tests (existing `tests/` + mock-provider harness)
 
 - **safe resolver:** `get_safe_block_number` parses a result and returns `None`/falls back correctly.
-- **safe-support preflight (§3a):** with a mock provider, assert the three classes are distinguished —
-  a valid `safe` block passes; a JSON-RPC error / rejected-tag response fails the fcr preflight (loud
-  `error!`, not silent downgrade); a `result: null` is treated as legitimate-empty (`None` → finalized
-  fallback), keyed on the presence of a JSON-RPC error object, not null-ness alone.
-- **event_indexer:** fcr mode caps at `safe`, sets `fcr_status='pending'` + `block_hash`; falls back
-  to finalized when `safe` is `None`.
+- **safe-support preflight (§3a):** with a mock provider, assert all four probe classes are
+  distinguished — a valid `safe` block; a JSON-RPC error / rejected tag ⇒ `Unsupported`; a
+  `result: null` ⇒ legitimate-empty (`None` → finalized fallback), keyed on the presence of a
+  JSON-RPC error object rather than null-ness; an HTTP error ⇒ `Unreachable`, **not** `Unsupported`.
+  Then the per-chain verdict: a safe-incapable chain is downgraded (loud `error!`, never silent), a
+  chain nothing could reach keeps fcr, and one bad provider in an otherwise good array is flagged
+  without downgrading.
+- **event_indexer:** fcr mode sets `fcr_status='pending'` + `block_hash`, block-finality leaves the
+  status `NULL`, and each indexer follows its own chain's mode. The bound itself (`resolve_upper_bound`
+  caps at `safe`, and falls back to `finalized` when `safe` is a legitimate `None`) is covered in the
+  end-to-end test below, where a mock EL can serve both tags.
 - **fcr_checker:** confirmed path; false-positive path (mismatch → row in `fcr_false_positives` +
-  status `reverted`); null-`getBlock` retry; per-chain scoping.
+  status `reverted`); null-`getBlock` retry; per-chain scoping; blocks above finalized left pending;
+  block-finality (NULL-status) rows ignored; NULL-`block_hash` pending rows never confirmed.
+- **end-to-end (`tests/fcr_e2e_test.rs`):** the three stages over the same rows, nothing hand-seeded
+  in between — preflight → indexer → msg_processor → checker. The component tests above can't observe
+  the property fcr actually trades on, that a row is **signed while still `pending`**
+  (`is_processed = 'true'` and `fcr_status = 'pending'` at once). Covers all three closures of that
+  window: block survives ⇒ `confirmed`; block reorged out ⇒ `reverted` plus an audit row carrying the
+  same `event_log_id` the sender received; block-finality mode unaffected (caps at `finalized` even
+  when the same RPC serves a fresher `safe`, NULL status, checker exits). Plus the §4 fresh-start
+  guard: a node with no safe block yet falls back to `finalized` and keeps indexing, and those rows
+  are still `pending` — `fcr_status` follows the chain's mode, not the bound a given cycle happened
+  to use. "Time passing" is two wiremock servers for one chain — the checker must get a different
+  answer than the indexer did to the same `eth_getBlockByNumber`.
+- **live RPC (`tests/live_rpc_test.rs`):** everything above runs on mocks, which prove the logic but
+  not that the wire format we parse is the one a real client emits. These close that gap — `safe`
+  leads `finalized`, the probe reports support, the preflight keeps fcr on, canonical hashes match
+  the node, and the checker confirms real blocks while flagging forged ones. Both `#[ignore]`d **and**
+  gated on `LIVE_EL_RPC`, so neither CI nor a plain `cargo test` ever depends on a network endpoint:
+  `LIVE_EL_RPC=http://host:port cargo test --test live_rpc_test -- --ignored`.
 
 ## Phasing
 
@@ -201,33 +249,23 @@ AND fcr_status = 'pending' AND block_number <= finalized`,
 - [x] Docs + env
 - [x] Unit tests
 - [x] Integration test (per-component, against a real Postgres + mock RPCs)
-- [ ] End-to-end test across indexer → msg_processor → fcr_checker in one run
+- [x] End-to-end test across indexer → msg_processor → fcr_checker in one run
 
 ## Implementation notes
 
 Where each piece landed:
 
-| Plan item                | Landed in                                                                 |
-| ------------------------ | ------------------------------------------------------------------------- |
-| Migration                | `bridge_validator/migrations/004_add_fcr_tracking.sql`                    |
-| Mode config              | `src/config/mod.rs` — `BlockProcessingMode`, `mode_for_chain`, `fcr_chains` |
-| Safe resolver + preflight | `src/service/safe.rs` (sibling of `finality.rs`, per §3)                  |
-| Indexer mode switch      | `src/service/event_indexer.rs` — `chain()`, `mode()`, `resolve_upper_bound()` |
-| Revalidation task        | `src/service/fcr_checker.rs`                                              |
-| Wiring                   | `src/main.rs` — preflight before service construction, checker in `tokio::join!` |
-| Tests                    | `tests/safe_test.rs`, `tests/fcr_checker_test.rs`, additions to `tests/event_indexer_test.rs` and `src/config/tests.rs` |
-
-Two deviations from the plan above, both in the direction of not producing false verdicts:
-
-1. **Preflight failure is scoped to "reachable but incapable".** A chain is downgraded to
-   `block-finality` only when providers *answered* and none would serve `safe`. If nothing was
-   reachable at boot (an RPC outage), fcr stays on and is logged at `error!` — a transient outage
-   should not silently pin a chain to finality for the process lifetime, and the per-cycle fallback
-   already covers it. See `ChainSafeSupport::keeps_fcr`.
-2. **Pending rows with a NULL `block_hash` are never adjudicated.** The indexer always records a
-   hash in fcr mode, so this state is a bug rather than a normal one. The checker excludes them
-   from the comparison query, counts them, and logs at `error!` — confirming them would be a
-   fabricated verdict, and reverting them would be a fabricated alert.
+| Plan item                 | Landed in                                                                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Migration                 | `bridge_validator/migrations/004_add_fcr_tracking.sql`                                                                  |
+| Mode config               | `src/config/mod.rs` — `BlockProcessingMode`, `mode_for_chain`, `fcr_chains`                                             |
+| Safe resolver + preflight | `src/service/safe.rs` (sibling of `finality.rs`, per §3)                                                                |
+| Indexer mode switch       | `src/service/event_indexer.rs` — `chain()`, `mode()`, `resolve_upper_bound()`                                           |
+| Revalidation task         | `src/service/fcr_checker.rs`                                                                                            |
+| Wiring                    | `src/main.rs` — preflight before service construction, checker in `tokio::join!`                                        |
+| Tests                     | `tests/safe_test.rs`, `tests/fcr_checker_test.rs`, additions to `tests/event_indexer_test.rs` and `src/config/tests.rs` |
+| End-to-end test           | `tests/fcr_e2e_test.rs` — preflight → indexer → msg_processor → checker over the same rows                              |
+| Live-RPC smoke tests      | `tests/live_rpc_test.rs` — `#[ignore]`d, gated on `LIVE_EL_RPC`                                                         |
 
 Two supporting details worth knowing when reading the code:
 

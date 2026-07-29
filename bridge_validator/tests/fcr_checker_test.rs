@@ -134,8 +134,26 @@ async fn test_surviving_block_confirms_every_row() {
     let finality = finality_provider(200).await;
     let blocks = block_provider("0xaaa").await;
 
-    insert_pending_row(&pool, "AMB_ETH", 100, Some("0xaaa"), "0xt1", 0, Some("pending")).await;
-    insert_pending_row(&pool, "XDAI_ETH", 100, Some("0xaaa"), "0xt2", 1, Some("pending")).await;
+    insert_pending_row(
+        &pool,
+        "AMB_ETH",
+        100,
+        Some("0xaaa"),
+        "0xt1",
+        0,
+        Some("pending"),
+    )
+    .await;
+    insert_pending_row(
+        &pool,
+        "XDAI_ETH",
+        100,
+        Some("0xaaa"),
+        "0xt2",
+        1,
+        Some("pending"),
+    )
+    .await;
 
     checker(fcr_config(finality.uri()), &pool)
         .check_chain("eth", &[blocks.uri()])
@@ -159,8 +177,26 @@ async fn test_replaced_block_records_a_false_positive_per_event() {
     let finality = finality_provider(200).await;
     let blocks = block_provider("0xbbb").await;
 
-    insert_pending_row(&pool, "AMB_ETH", 100, Some("0xaaa"), "0xt1", 0, Some("pending")).await;
-    insert_pending_row(&pool, "AMB_ETH", 100, Some("0xaaa"), "0xt2", 1, Some("pending")).await;
+    insert_pending_row(
+        &pool,
+        "AMB_ETH",
+        100,
+        Some("0xaaa"),
+        "0xt1",
+        0,
+        Some("pending"),
+    )
+    .await;
+    insert_pending_row(
+        &pool,
+        "AMB_ETH",
+        100,
+        Some("0xaaa"),
+        "0xt2",
+        1,
+        Some("pending"),
+    )
+    .await;
 
     checker(fcr_config(finality.uri()), &pool)
         .check_chain("eth", &[blocks.uri()])
@@ -171,15 +207,21 @@ async fn test_replaced_block_records_a_false_positive_per_event() {
         assert_eq!(status.as_deref(), Some("reverted"), "row {}", tx);
     }
 
-    let records: Vec<(String, i64, String, Option<String>, Option<String>, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT chain, block_number, stored_block_hash, canonical_block_hash, \
+    let records: Vec<(
+        String,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT chain, block_number, stored_block_hash, canonical_block_hash, \
              transaction_hash, detected_at_finalized FROM fcr_false_positives \
              ORDER BY transaction_hash",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
 
     assert_eq!(records.len(), 2, "one audit row per affected event");
     assert_eq!(records[0].0, "eth");
@@ -198,7 +240,16 @@ async fn test_unavailable_block_is_retried_not_resolved() {
     let finality = finality_provider(200).await;
     let blocks = empty_block_provider().await;
 
-    insert_pending_row(&pool, "AMB_ETH", 100, Some("0xaaa"), "0xt1", 0, Some("pending")).await;
+    insert_pending_row(
+        &pool,
+        "AMB_ETH",
+        100,
+        Some("0xaaa"),
+        "0xt1",
+        0,
+        Some("pending"),
+    )
+    .await;
 
     checker(fcr_config(finality.uri()), &pool)
         .check_chain("eth", &[blocks.uri()])
@@ -218,8 +269,26 @@ async fn test_check_chain_is_scoped_to_one_chain() {
     let finality = finality_provider(200).await;
     let blocks = block_provider("0xaaa").await;
 
-    insert_pending_row(&pool, "AMB_ETH", 100, Some("0xaaa"), "0xt1", 0, Some("pending")).await;
-    insert_pending_row(&pool, "AMB_GC", 100, Some("0xaaa"), "0xt2", 1, Some("pending")).await;
+    insert_pending_row(
+        &pool,
+        "AMB_ETH",
+        100,
+        Some("0xaaa"),
+        "0xt1",
+        0,
+        Some("pending"),
+    )
+    .await;
+    insert_pending_row(
+        &pool,
+        "AMB_GC",
+        100,
+        Some("0xaaa"),
+        "0xt2",
+        1,
+        Some("pending"),
+    )
+    .await;
 
     checker(fcr_config(finality.uri()), &pool)
         .check_chain("eth", &[blocks.uri()])
@@ -239,7 +308,16 @@ async fn test_blocks_above_finalized_are_left_pending() {
     let finality = finality_provider(200).await;
     let blocks = block_provider("0xbbb").await;
 
-    insert_pending_row(&pool, "AMB_ETH", 300, Some("0xaaa"), "0xt1", 0, Some("pending")).await;
+    insert_pending_row(
+        &pool,
+        "AMB_ETH",
+        300,
+        Some("0xaaa"),
+        "0xt1",
+        0,
+        Some("pending"),
+    )
+    .await;
 
     checker(fcr_config(finality.uri()), &pool)
         .check_chain("eth", &[blocks.uri()])

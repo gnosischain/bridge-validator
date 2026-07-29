@@ -98,7 +98,11 @@ async fn test_probe_classifies_a_rejected_tag_as_unsupported() {
 
     match probe {
         SafeProbe::Unsupported(reason) => {
-            assert!(reason.contains("-32602"), "reason should carry the JSON-RPC error: {}", reason)
+            assert!(
+                reason.contains("-32602"),
+                "reason should carry the JSON-RPC error: {}",
+                reason
+            )
         }
         other => panic!("expected Unsupported, got {:?}", other),
     }
@@ -171,7 +175,9 @@ async fn test_safe_resolver_returns_none_for_legitimate_empty() {
     let empty = provider_with_null_result().await;
     let client = reqwest::Client::new();
 
-    let result = get_safe_block_number(&client, &[empty.uri()]).await.unwrap();
+    let result = get_safe_block_number(&client, &[empty.uri()])
+        .await
+        .unwrap();
 
     assert_eq!(result, None);
 }

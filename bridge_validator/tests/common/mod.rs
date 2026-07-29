@@ -75,7 +75,10 @@ async fn init_test_database() -> Arc<TestDatabase> {
         .get_or_init(|| async {
             // Check if DATABASE_URL is set (for CI/CD)
             if let Ok(database_url) = std::env::var("DATABASE_URL") {
-                eprintln!("Using external database from DATABASE_URL: {}", database_url);
+                eprintln!(
+                    "Using external database from DATABASE_URL: {}",
+                    database_url
+                );
 
                 // No container needed for external database
                 return Arc::new(TestDatabase {
@@ -123,10 +126,7 @@ async fn init_test_database() -> Arc<TestDatabase> {
                         break;
                     }
                     Err(e) if retries > 0 => {
-                        eprintln!(
-                            "Failed to connect, retrying... ({} attempts left)",
-                            retries
-                        );
+                        eprintln!("Failed to connect, retrying... ({} attempts left)", retries);
                         eprintln!("Error: {}", e);
                         retries -= 1;
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

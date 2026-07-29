@@ -179,10 +179,12 @@ impl Config {
         let gc_rpc: Vec<String> = Self::parse_rpc_urls(
             env::var("GC_RPC").map_err(|err| format!("Error reading GC_RPC: {}", err))?,
         );
-        let eth_bc_rpc: Vec<String> =
-            env::var("ETH_BC_RPC").map(Self::parse_rpc_urls).unwrap_or_default();
-        let gc_bc_rpc: Vec<String> =
-            env::var("GC_BC_RPC").map(Self::parse_rpc_urls).unwrap_or_default();
+        let eth_bc_rpc: Vec<String> = env::var("ETH_BC_RPC")
+            .map(Self::parse_rpc_urls)
+            .unwrap_or_default();
+        let gc_bc_rpc: Vec<String> = env::var("GC_BC_RPC")
+            .map(Self::parse_rpc_urls)
+            .unwrap_or_default();
 
         // Validate that at least one RPC URL is provided for each
         if eth_rpc.is_empty() {

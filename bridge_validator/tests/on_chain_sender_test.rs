@@ -227,4 +227,3 @@ mod database_tests {
         pool.close().await;
     }
 }
-

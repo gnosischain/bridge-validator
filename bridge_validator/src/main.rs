@@ -16,7 +16,7 @@ use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::{mpsc, watch};
 use tracing;
-use tracing_subscriber::{self, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<(), BridgeValidatorError> {
@@ -138,10 +138,18 @@ async fn main() -> Result<(), BridgeValidatorError> {
 
     let (tx, rx) = mpsc::channel::<SenderData>(32);
 
-    let msg_processor_1 =
-        MessageProcessor::new(config.clone(), pool.clone(), tx.clone(), shutdown_rx.clone());
-    let msg_processor_2 =
-        MessageProcessor::new(config.clone(), pool.clone(), tx.clone(), shutdown_rx.clone());
+    let msg_processor_1 = MessageProcessor::new(
+        config.clone(),
+        pool.clone(),
+        tx.clone(),
+        shutdown_rx.clone(),
+    );
+    let msg_processor_2 = MessageProcessor::new(
+        config.clone(),
+        pool.clone(),
+        tx.clone(),
+        shutdown_rx.clone(),
+    );
 
     let on_chain_sender = OnChainSender::new(config.clone(), pool.clone(), rx);
 
