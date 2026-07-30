@@ -208,6 +208,59 @@ mod tests {
         std::env::remove_var("MAX_RETRY_COUNT");
     }
 
+    #[test]
+    fn test_config_default_max_block_range() {
+        let _lock = env_lock();
+        set_required_env_vars();
+        std::env::remove_var("MAX_BLOCK_RANGE");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(
+            config.max_block_range,
+            crate::config::DEFAULT_MAX_BLOCK_RANGE
+        );
+        assert_eq!(config.max_block_range, 2000);
+    }
+
+    #[test]
+    fn test_config_custom_max_block_range() {
+        let _lock = env_lock();
+        set_required_env_vars();
+        std::env::set_var("MAX_BLOCK_RANGE", "500");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.max_block_range, 500);
+
+        // Cleanup
+        std::env::remove_var("MAX_BLOCK_RANGE");
+    }
+
+    #[test]
+    fn test_config_invalid_max_block_range_uses_default() {
+        let _lock = env_lock();
+
+        // Zero would make the indexer's chunk cursor advance by nothing, so it
+        // is rejected the same way an unparseable value is.
+        for bad in ["invalid", "0", "-5", "  "] {
+            set_required_env_vars();
+            std::env::set_var("MAX_BLOCK_RANGE", bad);
+
+            let config = Config::from_env().unwrap();
+
+            assert_eq!(
+                config.max_block_range,
+                crate::config::DEFAULT_MAX_BLOCK_RANGE,
+                "MAX_BLOCK_RANGE='{}' should fall back to the default",
+                bad
+            );
+        }
+
+        // Cleanup
+        std::env::remove_var("MAX_BLOCK_RANGE");
+    }
+
     /// Set the env vars `Config::from_env` requires, and clear the fcr check
     /// interval so each case below starts from a known state.
     fn set_required_env_vars() {

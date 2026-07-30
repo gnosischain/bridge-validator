@@ -88,6 +88,10 @@ pub struct Config {
     /// cadence.
     pub fcr_check_interval_secs: u64,
     pub max_retry_count: u64,
+    /// Largest span of blocks, inclusive, that a single `eth_getLogs` call may
+    /// cover. `service::event_indexer` splits a wider catch-up range into
+    /// consecutive chunks of at most this size.
+    pub max_block_range: u64,
     pub eth_block_processing_mode: BlockProcessingMode,
     pub gc_block_processing_mode: BlockProcessingMode,
 }
@@ -105,6 +109,17 @@ pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 10;
 /// claimed by [`crate::service::msg_processor`] and is left in `event_logs` for
 /// an operator to inspect.
 pub const DEFAULT_MAX_RETRY_COUNT: u64 = 5;
+
+/// Default `eth_getLogs` chunk size, in blocks.
+///
+/// Public providers cap log queries — commonly at 10k blocks or 10k returned
+/// logs — and reject anything wider with an error that carries no hint of the
+/// limit. Without a cap the indexer's request span grows by one poll interval
+/// on every failed cycle, so a long RPC outage eventually produces a range no
+/// provider will ever serve and the indexer stalls permanently. 2000 sits
+/// comfortably under every limit we have seen while still covering ~6.7h of
+/// Ethereum (12s blocks) or ~2.8h of Gnosis (5s blocks) per chunk.
+pub const DEFAULT_MAX_BLOCK_RANGE: u64 = 2000;
 
 impl Config {
     /// Parse comma-separated RPC URLs from environment variable
@@ -200,8 +215,9 @@ impl Config {
     /// mistypes an interval otherwise gets a cadence that appears nowhere in
     /// their configuration and nowhere in the docs. Zero is rejected along with
     /// unparseable values — for the interval knobs a zero sleep turns the loop
-    /// into a hot loop hammering the RPC, and for the retry ceiling it stalls
-    /// the pipeline outright, both worse outcomes than ignoring the typo.
+    /// into a hot loop hammering the RPC, for the retry ceiling it stalls the
+    /// pipeline outright, and for the chunk size it advances the indexer's
+    /// cursor by nothing, all worse outcomes than ignoring the typo.
     /// Unlike the block processing mode, a bad value here cannot silently
     /// change *what* the validator does — only how often, or how many times —
     /// so it warns rather than failing startup.
@@ -315,6 +331,10 @@ impl Config {
             max_retry_count: Self::positive_u64_from_env(
                 "MAX_RETRY_COUNT",
                 DEFAULT_MAX_RETRY_COUNT,
+            ),
+            max_block_range: Self::positive_u64_from_env(
+                "MAX_BLOCK_RANGE",
+                DEFAULT_MAX_BLOCK_RANGE,
             ),
             eth_block_processing_mode: BlockProcessingMode::from_env("ETH_BLOCK_PROCESSING_MODE")?,
             gc_block_processing_mode: BlockProcessingMode::from_env("GC_BLOCK_PROCESSING_MODE")?,

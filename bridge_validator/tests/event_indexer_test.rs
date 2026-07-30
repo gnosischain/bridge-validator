@@ -34,6 +34,7 @@ fn create_test_config() -> Config {
         poll_interval_secs: 10,
         fcr_check_interval_secs: 10,
         max_retry_count: 5,
+        max_block_range: 2000,
         eth_block_processing_mode: BlockProcessingMode::BlockFinality,
         gc_block_processing_mode: BlockProcessingMode::BlockFinality,
     }
@@ -506,4 +507,162 @@ async fn test_indexer_mode_follows_its_own_chain() {
     assert_eq!(gc_indexer.chain(), "gc");
     assert_eq!(eth_indexer.mode(), BlockProcessingMode::BlockFinality);
     assert_eq!(gc_indexer.mode(), BlockProcessingMode::Fcr);
+}
+
+// ============================================================================
+// MAX_BLOCK_RANGE chunking
+// ============================================================================
+
+/// A catch-up range wider than `max_block_range` must be split across several
+/// `eth_getLogs` calls rather than issued as one query the provider would
+/// reject. The asserter hands out one queued response per call, so consuming
+/// exactly three is what proves the range was split into three chunks.
+#[tokio::test]
+async fn test_wide_range_is_split_into_chunks() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let mut config = create_test_config();
+    config.max_block_range = 100;
+
+    // (500, 800] is 300 blocks => 3 chunks of 100: 501..=600, 601..=700, 701..=800.
+    let base_block = 99910000u64;
+    let logs_per_chunk: Vec<_> = (0..3u64)
+        .map(|i| {
+            vec![create_test_log_with_address_and_topic(
+                base_block + i,
+                &format!("0xd{:063x}", i + 1),
+                config.eth_amb_bridge_address,
+                [0x77u8; 32],
+                0,
+            )]
+        })
+        .collect();
+
+    let (provider, asserter): (_, Asserter) = create_mock_provider();
+    for chunk_logs in &logs_per_chunk {
+        asserter.push_success(chunk_logs);
+    }
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let indexer = EventIndexer::new(
+        config.clone(),
+        provider,
+        "eth".to_string(),
+        "UserRequestForAffirmation".to_string(),
+        config.eth_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx,
+    );
+
+    let cursor = indexer
+        .poll_events(500, 800)
+        .await
+        .expect("chunked polling should succeed");
+
+    // The cursor lands on the upper bound, not on a chunk boundary.
+    assert_eq!(cursor, 800);
+
+    // Every chunk's logs were persisted — no chunk was dropped on the way.
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM event_logs WHERE block_number >= $1 AND block_number < $1 + 3",
+    )
+    .bind(base_block as i64)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count.0, 3, "all 3 chunks should have been indexed");
+
+    sqlx::query("DELETE FROM event_logs WHERE block_number >= $1 AND block_number < $1 + 3")
+        .bind(base_block as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// A chunk that fails partway through a catch-up must not throw away the
+/// chunks that already landed. The returned cursor is the end of the last
+/// successful chunk, so the next cycle resumes there instead of replaying —
+/// and, critically, instead of leaving the cursor pinned while the upper bound
+/// keeps rising.
+#[tokio::test]
+async fn test_partial_chunk_failure_keeps_progress() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let mut config = create_test_config();
+    config.max_block_range = 100;
+
+    let block_number = 99920000u64;
+    let log = create_test_log_with_address_and_topic(
+        block_number,
+        "0xe111111111111111111111111111111111111111111111111111111111111111",
+        config.eth_amb_bridge_address,
+        [0x88u8; 32],
+        0,
+    );
+
+    let (provider, asserter): (_, Asserter) = create_mock_provider();
+    asserter.push_success(&vec![log]); // chunk 1: 501..=600 succeeds
+    asserter.push_failure_msg("query returned more than 10000 results"); // chunk 2 fails
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let indexer = EventIndexer::new(
+        config.clone(),
+        provider,
+        "eth".to_string(),
+        "UserRequestForAffirmation".to_string(),
+        config.eth_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx,
+    );
+
+    let cursor = indexer
+        .poll_events(500, 800)
+        .await
+        .expect("a partial failure keeps progress rather than failing the cycle");
+
+    assert_eq!(
+        cursor, 600,
+        "cursor should stop at the last chunk that landed"
+    );
+
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM event_logs WHERE block_number = $1")
+        .bind(block_number as i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 1, "the successful chunk's log stays persisted");
+
+    sqlx::query("DELETE FROM event_logs WHERE block_number = $1")
+        .bind(block_number as i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// When the very first chunk fails there is no progress to keep, so the error
+/// propagates and `start()` leaves the cursor untouched — the range is retried
+/// whole on the next cycle.
+#[tokio::test]
+async fn test_first_chunk_failure_propagates() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let mut config = create_test_config();
+    config.max_block_range = 100;
+
+    let (provider, asserter): (_, Asserter) = create_mock_provider();
+    asserter.push_failure_msg("block range too large");
+
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let indexer = EventIndexer::new(
+        config.clone(),
+        provider,
+        "eth".to_string(),
+        "UserRequestForAffirmation".to_string(),
+        config.eth_amb_bridge_address,
+        pool.clone(),
+        shutdown_rx,
+    );
+
+    let result = indexer.poll_events(500, 800).await;
+    assert!(
+        result.is_err(),
+        "a total failure must surface, not report phantom progress"
+    );
 }

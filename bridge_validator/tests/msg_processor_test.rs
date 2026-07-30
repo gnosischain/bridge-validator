@@ -40,6 +40,7 @@ fn create_test_config() -> Config {
         poll_interval_secs: 10,
         fcr_check_interval_secs: 10,
         max_retry_count: 5,
+        max_block_range: 2000,
         eth_block_processing_mode: BlockProcessingMode::BlockFinality,
         gc_block_processing_mode: BlockProcessingMode::BlockFinality,
     }
@@ -70,6 +71,7 @@ fn create_test_config_with_keys() -> Config {
         poll_interval_secs: 10,
         fcr_check_interval_secs: 10,
         max_retry_count: 5,
+        max_block_range: 2000,
         eth_block_processing_mode: BlockProcessingMode::BlockFinality,
         gc_block_processing_mode: BlockProcessingMode::BlockFinality,
     }

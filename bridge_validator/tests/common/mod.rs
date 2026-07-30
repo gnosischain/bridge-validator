@@ -302,6 +302,7 @@ pub fn create_test_config() -> worker::config::Config {
         poll_interval_secs: 1,
         fcr_check_interval_secs: 1,
         max_retry_count: 5,
+        max_block_range: 2000,
         eth_block_processing_mode: worker::config::BlockProcessingMode::BlockFinality,
         gc_block_processing_mode: worker::config::BlockProcessingMode::BlockFinality,
     }

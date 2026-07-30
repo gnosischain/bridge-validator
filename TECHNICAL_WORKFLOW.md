@@ -205,6 +205,7 @@ than one is configured) plus a plain `reqwest::Client` for the raw JSON-RPC fina
 | **Output**          | Rows in `event_logs`                                                                                                         |
 | **In-memory state** | `last_processed_block: u64` — **not persisted**; resets to 0 on restart                                                      |
 | **Cadence**         | `POLL_INTERVAL_SECS` (default 10)                                                                                            |
+| **Query width**     | `MAX_BLOCK_RANGE` blocks per `eth_getLogs` (default 2000); wider ranges are chunked                                          |
 
 Per cycle:
 
@@ -218,17 +219,21 @@ Per cycle:
 2. if upper_bound <= last_processed_block → nothing to do
 
 3. start_block = (last_processed_block == 0) ? upper_bound : last_processed_block + 1
-   eth_getLogs(address, event, from=start_block, to=upper_bound)
 
-4. for each log:
-      skip if log_index is None      (WARN — an unfinalized/pending log)
-      skip if topics[0] is None      (WARN)
-      INSERT ... ON CONFLICT (transaction_hash, log_index) DO NOTHING
+4. for each chunk [c_start, c_end] of at most MAX_BLOCK_RANGE blocks
+   covering start_block..=upper_bound:
+      eth_getLogs(address, event, from=c_start, to=c_end)
+      for each log:
+         skip if log_index is None      (WARN — an unfinalized/pending log)
+         skip if topics[0] is None      (WARN)
+         INSERT ... ON CONFLICT (transaction_hash, log_index) DO NOTHING
+      on chunk error → stop; return the previous chunk's end (or Err if the
+                       first chunk failed, leaving the cursor untouched)
 
-5. last_processed_block = upper_bound
+5. last_processed_block = end of the last chunk that succeeded
 ```
 
-Two behaviours worth knowing:
+Three behaviours worth knowing:
 
 - **Cold start indexes exactly one block.** With `last_processed_block == 0`, `start_block`
   equals `upper_bound`, so the first cycle queries the single block `[upper, upper]`. There is no
@@ -237,6 +242,11 @@ Two behaviours worth knowing:
   already persisted before the restart, which are picked up by the message processor from the DB.
 - **The cursor advances to the bound, never to the chain tip.** Blocks between the bound and the
   tip are simply revisited on a later cycle; they are never skipped.
+- **A wide range is chunked, and partial progress is kept.** Because a failed cycle does not
+  advance the cursor while `upper_bound` keeps rising, a single unbounded `eth_getLogs` would grow
+  on every failure until no provider would serve it — a permanent stall. `MAX_BLOCK_RANGE` caps
+  each query, and the cursor moves to the last chunk that actually landed, so catch-up after an
+  RPC outage converges instead of replaying the whole range each cycle.
 
 The inserted row's `fcr_status` follows **the chain's configured mode, not the bound this
 particular cycle happened to use**: `Fcr` → `'pending'`, `BlockFinality` → `NULL`. So if an fcr
@@ -505,7 +515,7 @@ sequenceDiagram
 
     U->>EB: bridge request
     EB-->>EB: emit UserRequestForAffirmation(messageId, encodedData)
-    IX->>EB: eth_getLogs((last, upper])
+    IX->>EB: eth_getLogs((last, upper]) in MAX_BLOCK_RANGE chunks
     IX->>PG: INSERT bridge_mode='AMB_ETH'
     MP->>PG: claim row (FOR UPDATE SKIP LOCKED) → is_processed='true'
     MP->>MP: decode UserRequestForAffirmation
@@ -787,6 +797,8 @@ at the ceiling.
 | Situation                               | Behaviour                                                                                                                         |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | Upper-bound resolution fails            | Indexer skips the whole cycle; cursor unchanged; nothing lost                                                                     |
+| First `eth_getLogs` chunk fails         | Error propagates to `start()`, which logs it; cursor unchanged; the range is retried whole next cycle                            |
+| A later `eth_getLogs` chunk fails       | Logged; cursor advances to the last chunk that landed, so the next cycle resumes at the failed chunk                             |
 | Log has no `log_index` / no `topics[0]` | Log is skipped with a `WARN`; not stored                                                                                          |
 | Duplicate `(tx_hash, log_index)`        | `ON CONFLICT DO NOTHING` — idempotent re-index                                                                                    |
 | Pre-flight says "already done on-chain" | Row deleted                                                                                                                       |
@@ -819,8 +831,9 @@ receipt.
 | `FCR_CHECK_INTERVAL_SECS`                                                                              | No       | `30`              | FCR checker cadence. `0` or unparseable → warns and uses 30                                      |
 | `AMB_EXECUTE_MESSAGE_ON_FOREIGN`, `XDAI_EXECUTE_MESSAGE_ON_FOREIGN`                                    | No       | `"false"`         | Whether this validator pays gas for the final ETH execution. Compared as the **string** `"true"` |
 | `MAX_RETRY_COUNT`                                                                                      | No       | `5`               | Retry ceiling in the `read_from_db` claim query. `0` or unparseable → warns and uses 5           |
+| `MAX_BLOCK_RANGE`                                                                                      | No       | `2000`            | Max blocks per indexer `eth_getLogs`; wider ranges are chunked. `0` or unparseable → warns and uses 2000 |
 
-The three numeric knobs above share one parser (`Config::positive_u64_from_env`): unset, empty,
+The four numeric knobs above share one parser (`Config::positive_u64_from_env`): unset, empty,
 unparseable and `0` all land on the documented default, and anything but "unset" logs a warning.
 | `RUST_LOG` | No | — | `EnvFilter` |
 

@@ -56,6 +56,8 @@ services:
       # fcr revalidation cadence in seconds (fcr mode only)
       FCR_CHECK_INTERVAL_SECS: ${FCR_CHECK_INTERVAL_SECS:-30}
       MAX_RETRY_COUNT: ${MAX_RETRY_COUNT:-5}
+      # Max block span per eth_getLogs call; wider ranges are chunked
+      MAX_BLOCK_RANGE: ${MAX_BLOCK_RANGE:-2000}
       XDAI_EXECUTE_MESSAGE_ON_FOREIGN: ${XDAI_EXECUTE_MESSAGE_ON_FOREIGN:-true} # true if execute message from GC -> ETH
       AMB_EXECUTE_MESSAGE_ON_FOREIGN: ${AMB_EXECUTE_MESSAGE_ON_FOREIGN:-true}
 

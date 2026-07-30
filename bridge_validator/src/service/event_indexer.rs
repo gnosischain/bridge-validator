@@ -113,6 +113,16 @@ impl<P: Provider> EventIndexer<P> {
     /// block in fcr mode. The cursor advances to that bound (never to the chain
     /// tip), so blocks between it and the tip are revisited on a later round
     /// rather than being skipped.
+    ///
+    /// The range is split into consecutive chunks of at most
+    /// `config.max_block_range` blocks, one `eth_getLogs` per chunk. A single
+    /// call spanning an arbitrarily wide range is what providers reject once
+    /// the validator falls far enough behind, and because a failed cycle does
+    /// not advance the cursor while the upper bound keeps rising, an unchunked
+    /// query only ever gets wider — the stall is permanent. Chunking also makes
+    /// catch-up incremental: the cursor is returned as of the last chunk that
+    /// actually succeeded, so a failure partway through keeps everything
+    /// indexed before it instead of replaying the whole range next cycle.
     pub async fn poll_events(
         &self,
         last_processed_block: u64,
@@ -144,11 +154,85 @@ impl<P: Provider> EventIndexer<P> {
             last_processed_block + 1
         };
 
+        // `positive_u64_from_env` rejects zero, so this is always >= 1 and the
+        // cursor below always advances.
+        let max_block_range = self.config.max_block_range;
+        let total_blocks = upper_bound_block - start_block + 1;
+        if total_blocks > max_block_range {
+            tracing::info!(
+                "[{}-{}] Catching up on {} blocks ({}..={}) in chunks of {}",
+                self.provider_name,
+                self.eventName,
+                total_blocks,
+                start_block,
+                upper_bound_block,
+                max_block_range
+            );
+        }
+
+        // Last block confirmed indexed. Stays below `start_block` until the
+        // first chunk lands, which is how a total failure is told apart from a
+        // partial one.
+        let mut indexed_through = start_block.saturating_sub(1);
+        let mut chunk_start = start_block;
+
+        while chunk_start <= upper_bound_block {
+            let chunk_end = chunk_start
+                .saturating_add(max_block_range - 1)
+                .min(upper_bound_block);
+
+            if let Err(e) = self.index_block_range(chunk_start, chunk_end).await {
+                if indexed_through >= start_block {
+                    // Earlier chunks landed. Keep them: the caller advances its
+                    // cursor to `indexed_through`, so the next cycle resumes at
+                    // the chunk that failed rather than re-querying from the
+                    // start of the range.
+                    tracing::error!(
+                        "[{}-{}] Failed to index blocks {}..={} ({}); keeping progress through block {}",
+                        self.provider_name,
+                        self.eventName,
+                        chunk_start,
+                        chunk_end,
+                        e,
+                        indexed_through
+                    );
+                    return Ok(indexed_through);
+                }
+                return Err(e);
+            }
+
+            indexed_through = chunk_end;
+            if chunk_end == u64::MAX {
+                break;
+            }
+            chunk_start = chunk_end + 1;
+        }
+
+        // Advance the cursor to the block we just indexed up to.
+        Ok(indexed_through)
+    }
+
+    /// Fetch and persist every matching log in the inclusive range
+    /// `[from_block, to_block]`. One `eth_getLogs` call; the caller is
+    /// responsible for keeping the span within `config.max_block_range`.
+    async fn index_block_range(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<(), BridgeValidatorError> {
+        tracing::debug!(
+            "[{}-{}] Fetching logs for blocks {}..={}",
+            self.provider_name,
+            self.eventName,
+            from_block,
+            to_block
+        );
+
         let filter = Filter::new()
             .address(self.contract_address)
             .event(&self.eventName)
-            .from_block(start_block)
-            .to_block(upper_bound_block);
+            .from_block(from_block)
+            .to_block(to_block);
 
         let logs = self
             .provider
@@ -237,8 +321,7 @@ impl<P: Provider> EventIndexer<P> {
             // Log found: Log { inner: Log { address: 0x4c36d2919e407f0cc2ee3c993ccf8ac26d9ce64e, data: LogData { topics: [0x482515ce3d9494a37ce83f18b72b363449458435fafdd7a53ddea7460fe01b58, 0x000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e6], data: 0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000b5000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e688ad09518695c6c3712ac10a214be5109a655671f6a78083ca3e2a662d6dd1703c939c8ace2e268d001e84800101000164125e4cfb0000000000000000000000006810e776880c02933d47db1b9fc05908e5386b9600000000000000000000000036c2879f055519593c28b56317950239c6ecd58b0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000 } }, block_hash: Some(0x223181b0230ef914af338eb648ed05c46743c985e9651b3fb2341c587e0b5f46), block_number: Some(24226354), block_timestamp: None, transaction_hash: Some(0x3108ac7fc0101b236fd43dbacac908e87f85035a65338ce9e6851773f9574706), transaction_index: Some(0), log_index: Some(1), removed: false }
         }
 
-        // Advance the cursor to the block we just indexed up to.
-        Ok(upper_bound_block)
+        Ok(())
     }
 
     /// Pick the finality source (beacon RPC + EL RPC fallbacks) for the chain
