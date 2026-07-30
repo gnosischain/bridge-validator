@@ -38,6 +38,7 @@ fn create_test_config() -> Config {
         xdai_bridge_helper_address: address!("0xe30269bc61E677cD60aD163a221e464B7022fbf5"),
         amb_bridge_helper_address: address!("0x7d94ece17e81355326e3359115D4B02411825EdD"),
         poll_interval_secs: 10,
+        fcr_check_interval_secs: 10,
         max_retry_count: 5,
         eth_block_processing_mode: BlockProcessingMode::BlockFinality,
         gc_block_processing_mode: BlockProcessingMode::BlockFinality,
@@ -67,6 +68,7 @@ fn create_test_config_with_keys() -> Config {
         xdai_bridge_helper_address: address!("0xe30269bc61E677cD60aD163a221e464B7022fbf5"),
         amb_bridge_helper_address: address!("0x7d94ece17e81355326e3359115D4B02411825EdD"),
         poll_interval_secs: 10,
+        fcr_check_interval_secs: 10,
         max_retry_count: 5,
         eth_block_processing_mode: BlockProcessingMode::BlockFinality,
         gc_block_processing_mode: BlockProcessingMode::BlockFinality,
@@ -510,6 +512,67 @@ async fn test_read_from_db_skips_high_retry_count() {
     let event_log = result.unwrap();
     assert_eq!(event_log.block_number, Some(200)); // Second entry
     assert_eq!(event_log.retry_count, Some(2));
+}
+
+/// `max_retry_count` must drive the ceiling in `read_from_db`, not a literal:
+/// raising it has to bring previously-abandoned rows back into the claim set,
+/// and lowering it has to push borderline rows out.
+#[tokio::test]
+async fn test_read_from_db_honours_configured_max_retry_count() {
+    let (pool, _db_lock) = setup_test_db().await;
+    let (tx, _rx) = mpsc::channel::<SenderData>(100);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // A row parked at retry_count = 5, i.e. abandoned under the default ceiling.
+    let test_log = create_test_log(
+        300,
+        "0xc333333333333333333333333333333333333333333333333333333333333333",
+    );
+    let log_json = serde_json::to_value(&test_log).unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO event_logs (topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind("UserRequestForSignature")
+    .bind("XDAI_GC")
+    .bind(&log_json)
+    .bind(300i64)
+    .bind("0xc333333333333333333333333333333333333333333333333333333333333333")
+    .bind("false")
+    .bind(5i32)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Default ceiling of 5: the row is out of reach.
+    let default_processor = MessageProcessor::new(
+        create_test_config(),
+        pool.clone(),
+        tx.clone(),
+        shutdown_rx.clone(),
+    );
+    assert!(
+        default_processor.read_from_db().await.unwrap().is_none(),
+        "retry_count = 5 should not be claimed under max_retry_count = 5"
+    );
+
+    // Raising the ceiling to 10 brings the same row back into scope.
+    let mut raised_config = create_test_config();
+    raised_config.max_retry_count = 10;
+    let raised_processor =
+        MessageProcessor::new(raised_config, pool.clone(), tx, shutdown_rx.clone());
+
+    let result = raised_processor.read_from_db().await.unwrap();
+    assert!(
+        result.is_some(),
+        "retry_count = 5 should be claimed under max_retry_count = 10"
+    );
+    let event_log = result.unwrap();
+    assert_eq!(event_log.block_number, Some(300));
+    assert_eq!(event_log.retry_count, Some(5));
 }
 
 #[tokio::test]

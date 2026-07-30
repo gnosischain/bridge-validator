@@ -27,10 +27,12 @@ use tokio::time::{sleep, Duration};
 /// piling up.
 const PENDING_BACKLOG_WARN_THRESHOLD: i64 = 100;
 
-/// How often to run a revalidation cycle. Finality advances about every 6.4
-/// minutes, so polling faster than this only burns RPC calls on blocks that
-/// cannot possibly have finalized yet.
-const CHECK_INTERVAL_SECS: u64 = 60;
+// How often a revalidation cycle runs is `Config::fcr_check_interval_secs`
+// (`FCR_CHECK_INTERVAL_SECS`, default 30s). Finality advances about every 6.4
+// minutes, so polling much faster than that only burns RPC calls on blocks that
+// cannot possibly have finalized yet — but the cadence is configurable because
+// test harnesses drive finality on demand and would otherwise spend most of
+// their wall-clock waiting out a production interval.
 
 /// One safe-processed block awaiting revalidation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,9 +87,12 @@ impl FcrChecker {
             return;
         }
 
+        let check_interval = Duration::from_secs(self.config.fcr_check_interval_secs);
+
         tracing::info!(
-            "[fcr-checker] Starting revalidation for chains: {:?}",
-            fcr_chains.iter().map(|(c, _)| *c).collect::<Vec<_>>()
+            "[fcr-checker] Starting revalidation for chains: {:?} (every {}s)",
+            fcr_chains.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+            self.config.fcr_check_interval_secs
         );
 
         loop {
@@ -98,7 +103,7 @@ impl FcrChecker {
             }
 
             tokio::select! {
-                _ = sleep(Duration::from_secs(CHECK_INTERVAL_SECS)) => {}
+                _ = sleep(check_interval) => {}
                 _ = self.shutdown.changed() => {
                     tracing::info!("[fcr-checker] Shutdown signal received, stopping");
                     break;

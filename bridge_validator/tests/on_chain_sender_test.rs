@@ -74,7 +74,10 @@ fn test_parse_xdai_message_invalid_length_long() {
 mod database_tests {
     use super::*;
     use common::{cleanup_test_db, create_test_config, setup_test_db};
+    use sqlx::PgPool;
     use tokio::sync::mpsc;
+    use worker::contracts::{AmbEthCalldata, OnChainCallData};
+    use worker::service::msg_processor::SenderData;
 
     #[tokio::test]
     async fn test_delete_event_log() {
@@ -195,6 +198,136 @@ mod database_tests {
             retry_count2, 0,
             "Second event_log retry_count should remain 0"
         );
+
+        cleanup_test_db(&pool).await;
+        pool.close().await;
+    }
+
+    /// An error that propagates out of `process_message` must put the row back
+    /// in the claimable pool. The processor claimed it with
+    /// `is_processed = 'true'`; if `start()` only logged the error the row
+    /// would be claimed by nobody, forever.
+    ///
+    /// Drives the real `start()` loop: one message in, then the sender half is
+    /// dropped so the loop sees a closed channel and returns.
+    async fn run_sender_until_drained(
+        config: worker::config::Config,
+        pool: PgPool,
+        calldata: OnChainCallData,
+        event_log_id: i32,
+    ) {
+        let (tx, rx) = mpsc::channel(1);
+        let sender = OnChainSender::new(config, pool, rx);
+
+        tx.send(SenderData {
+            on_chain_calldata: calldata,
+            event_log_id,
+            stage: "home".to_string(),
+        })
+        .await
+        .expect("Failed to queue message for the sender");
+        drop(tx);
+
+        sender.start().await;
+    }
+
+    /// Insert a row in the state the message processor leaves behind: claimed,
+    /// never retried.
+    async fn insert_claimed_row(pool: &PgPool, topic_key: &str, tx_hash: &str) -> i32 {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO event_logs (topic_key, bridge_mode, log_data, retry_count, is_processed, block_number, transaction_hash)
+            VALUES ($1, 'AMB_ETH', '{}', 0, 'true', 100, $2)
+            RETURNING id
+            "#,
+        )
+        .bind(topic_key)
+        .bind(tx_hash)
+        .fetch_one(pool)
+        .await
+        .expect("Failed to insert claimed event_log");
+
+        row.get("id")
+    }
+
+    async fn assert_released(pool: &PgPool, event_log_id: i32) {
+        let row = sqlx::query("SELECT retry_count, is_processed FROM event_logs WHERE id = $1")
+            .bind(event_log_id)
+            .fetch_one(pool)
+            .await
+            .expect("Row should still exist after a processing error");
+
+        let retry_count: i32 = row.get("retry_count");
+        let is_processed: String = row.get("is_processed");
+
+        assert_eq!(
+            retry_count, 1,
+            "a propagating error should increment retry_count"
+        );
+        assert_eq!(
+            is_processed, "false",
+            "a propagating error should release the claim so the row is re-claimable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_validator_key_releases_the_row() {
+        let (pool, _db_lock) = setup_test_db().await;
+        let event_log_id = insert_claimed_row(
+            &pool,
+            "test_key_missing_key",
+            "0x5555555555555555555555555555555555555555555555555555555555555555",
+        )
+        .await;
+
+        // `create_test_config` carries no private keys, so AmbEth fails at the
+        // MissingEnv check before any network I/O happens.
+        let calldata = OnChainCallData::AmbEth {
+            contract_address: Address::from([0x11; 20]),
+            calldata: AmbEthCalldata {
+                message: Bytes::from(vec![1, 2, 3, 4]),
+            },
+        };
+
+        run_sender_until_drained(create_test_config(), pool.clone(), calldata, event_log_id).await;
+
+        assert_released(&pool, event_log_id).await;
+
+        cleanup_test_db(&pool).await;
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_failed_view_call_releases_the_row() {
+        let (pool, _db_lock) = setup_test_db().await;
+        let event_log_id = insert_claimed_row(
+            &pool,
+            "test_key_dead_rpc",
+            "0x6666666666666666666666666666666666666666666666666666666666666666",
+        )
+        .await;
+
+        // A key is present, so the branch gets as far as the
+        // `affirmationsSigned` view call — which fails against a dead RPC.
+        // Whether that surfaces as ContractCall or RpcConnect depends on when
+        // alloy opens the connection; both propagate out of `process_message`,
+        // which is what this test is about.
+        let mut config = create_test_config();
+        config.amb_validator_private_key = Some(
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
+        );
+        config.gc_rpc = vec!["http://127.0.0.1:1".to_string()];
+
+        let calldata = OnChainCallData::AmbEth {
+            contract_address: Address::from([0x11; 20]),
+            calldata: AmbEthCalldata {
+                message: Bytes::from(vec![1, 2, 3, 4]),
+            },
+        };
+
+        run_sender_until_drained(config, pool.clone(), calldata, event_log_id).await;
+
+        assert_released(&pool, event_log_id).await;
 
         cleanup_test_db(&pool).await;
         pool.close().await;

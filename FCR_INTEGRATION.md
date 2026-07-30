@@ -87,6 +87,14 @@ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP );`
   `set_mode_for_chain` (how the §3a preflight applies a downgrade),
   `finality_rpcs_for_chain` (beacon + EL fallbacks for a chain) and
   `bridge_modes_for_chain` (the `event_logs.bridge_mode` values a chain owns).
+- Add `fcr_check_interval_secs`, parsed from `FCR_CHECK_INTERVAL_SECS` (default
+  `DEFAULT_FCR_CHECK_INTERVAL_SECS` = **30s**) — the revalidation cadence used by §5's checker.
+  Distinct from `POLL_INTERVAL_SECS`, which drives the indexers. Unlike the mode vars, a bad
+  value here only changes *how often* the checker runs, never *what* the validator does, so
+  unparseable values (and `0`, which would make the loop hot-spin on the EL RPC) warn and fall
+  back to the default rather than failing startup. Configurable because e2e harnesses advance
+  finality on demand and would otherwise spend most of their wall-clock waiting out a
+  production-cadence sleep.
 
 ### 3. `service/finality.rs` (or sibling `safe.rs`)
 
@@ -145,7 +153,10 @@ believe they have ~12s confirmation. The check surfaces that at boot instead of 
 ### 5. `service/fcr_checker.rs` (new — the revalidation task)
 
 - Struct with a `start()` loop added to `tokio::join!` in `main.rs`. Runs only if ≥1 chain is in
-  fcr mode (else logs "not required" and returns).
+  fcr mode (else logs "not required" and returns). Cycle cadence comes from
+  `config.fcr_check_interval_secs` (`FCR_CHECK_INTERVAL_SECS`, default 30s); the first cycle runs
+  immediately at startup and the sleep is after the work, so the worst-case detection lag for a
+  block that finalizes mid-cycle is one interval plus the cycle's own duration.
 - Per cycle, per fcr chain:
   1. resolve `finalized` via `finality.rs`,
   2. `SELECT DISTINCT block_number, block_hash FROM event_logs WHERE bridge_mode IN (<chain modes>)

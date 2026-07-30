@@ -80,10 +80,31 @@ pub struct Config {
     pub xdai_bridge_helper_address: Address,
     pub amb_bridge_helper_address: Address,
     pub poll_interval_secs: u64,
+    /// How often `service::fcr_checker` re-checks safe-processed blocks that
+    /// have since finalized. Separate from `poll_interval_secs`, which drives
+    /// the indexers: revalidation is gated on finality (~6.4 min), so it is
+    /// deliberately much slower than indexing. Configurable because test
+    /// harnesses drive finality on demand and cannot wait out a production
+    /// cadence.
+    pub fcr_check_interval_secs: u64,
     pub max_retry_count: u64,
     pub eth_block_processing_mode: BlockProcessingMode,
     pub gc_block_processing_mode: BlockProcessingMode,
 }
+
+/// Default revalidation cadence, in seconds. Finality advances roughly every
+/// 6.4 minutes, so this only needs to be fast enough that a finalized block is
+/// re-checked promptly — polling faster mostly burns RPC calls on blocks that
+/// cannot have finalized yet.
+pub const DEFAULT_FCR_CHECK_INTERVAL_SECS: u64 = 30;
+
+/// Default indexer polling cadence, in seconds.
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 10;
+
+/// Default retry ceiling. A row whose `retry_count` reaches this is no longer
+/// claimed by [`crate::service::msg_processor`] and is left in `event_logs` for
+/// an operator to inspect.
+pub const DEFAULT_MAX_RETRY_COUNT: u64 = 5;
 
 impl Config {
     /// Parse comma-separated RPC URLs from environment variable
@@ -172,6 +193,41 @@ impl Config {
         }
     }
 
+    /// Read a positive integer from `name`, falling back to `default` when the
+    /// variable is unset, empty, unparseable, or zero.
+    ///
+    /// Unset and malformed must land on the *same* value: an operator who
+    /// mistypes an interval otherwise gets a cadence that appears nowhere in
+    /// their configuration and nowhere in the docs. Zero is rejected along with
+    /// unparseable values — for the interval knobs a zero sleep turns the loop
+    /// into a hot loop hammering the RPC, and for the retry ceiling it stalls
+    /// the pipeline outright, both worse outcomes than ignoring the typo.
+    /// Unlike the block processing mode, a bad value here cannot silently
+    /// change *what* the validator does — only how often, or how many times —
+    /// so it warns rather than failing startup.
+    fn positive_u64_from_env(name: &str, default: u64) -> u64 {
+        let raw = match env::var(name) {
+            Ok(raw) => raw,
+            Err(_) => return default,
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return default;
+        }
+        match trimmed.parse::<u64>() {
+            Ok(0) | Err(_) => {
+                tracing::warn!(
+                    "Invalid {} '{}' (expected a positive integer); falling back to {}",
+                    name,
+                    trimmed,
+                    default
+                );
+                default
+            }
+            Ok(value) => value,
+        }
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let eth_rpc: Vec<String> = Self::parse_rpc_urls(
             env::var("ETH_RPC").map_err(|err| format!("Error reading ETH_RPC: {}", err))?,
@@ -248,14 +304,18 @@ impl Config {
                 .unwrap_or_else(|_| "0x7d94ece17e81355326e3359115D4B02411825EdD".to_string())
                 .parse()
                 .map_err(|err| format!("Error parsing AMB_BRIDGE_HELPER_ADDRESS: {}", err))?,
-            poll_interval_secs: env::var("POLL_INTERVAL_SECS")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(5),
-            max_retry_count: env::var("MAX_RETRY_COUNT")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse()
-                .unwrap_or(5),
+            poll_interval_secs: Self::positive_u64_from_env(
+                "POLL_INTERVAL_SECS",
+                DEFAULT_POLL_INTERVAL_SECS,
+            ),
+            fcr_check_interval_secs: Self::positive_u64_from_env(
+                "FCR_CHECK_INTERVAL_SECS",
+                DEFAULT_FCR_CHECK_INTERVAL_SECS,
+            ),
+            max_retry_count: Self::positive_u64_from_env(
+                "MAX_RETRY_COUNT",
+                DEFAULT_MAX_RETRY_COUNT,
+            ),
             eth_block_processing_mode: BlockProcessingMode::from_env("ETH_BLOCK_PROCESSING_MODE")?,
             gc_block_processing_mode: BlockProcessingMode::from_env("GC_BLOCK_PROCESSING_MODE")?,
         })

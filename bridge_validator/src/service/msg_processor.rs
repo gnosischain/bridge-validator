@@ -339,6 +339,12 @@ impl MessageProcessor {
         // Start a transaction for atomic read and update
         let mut tx = self.db_pool.begin().await?;
 
+        // `retry_count` is an INT column, so the ceiling is compared as i32.
+        // `max_retry_count` is operator-supplied and unbounded, so saturate
+        // rather than wrap: a ceiling above i32::MAX means "never give up",
+        // which is what clamping to i32::MAX yields in practice.
+        let max_retry_count = i32::try_from(self.config.max_retry_count).unwrap_or(i32::MAX);
+
         // FOR UPDATE SKIP LOCKED
         // 1. FOR UPDATE - Locks the selected row(s) within the transaction, preventing other transactions from reading or modifying them
         // 2. SKIP LOCKED - If a row is already locked by another transaction, skip it and move to the next available row
@@ -348,11 +354,12 @@ impl MessageProcessor {
             r#"
             SELECT id, topic_key, bridge_mode, log_data, block_number, transaction_hash, is_processed, retry_count, stage
             FROM event_logs
-            WHERE is_processed = 'false' AND retry_count < 5
+            WHERE is_processed = 'false' AND retry_count < $1
             ORDER BY block_number ASC, log_index ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
-            "#
+            "#,
+            max_retry_count
         )
         .fetch_optional(&mut *tx)
         .await?;

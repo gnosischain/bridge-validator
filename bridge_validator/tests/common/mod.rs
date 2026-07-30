@@ -300,6 +300,7 @@ pub fn create_test_config() -> worker::config::Config {
         xdai_bridge_helper_address: address!("e30269bc61E677cD60aD163a221e464B7022fbf5"),
         amb_bridge_helper_address: address!("7d94ece17e81355326e3359115D4B02411825EdD"),
         poll_interval_secs: 1,
+        fcr_check_interval_secs: 1,
         max_retry_count: 5,
         eth_block_processing_mode: worker::config::BlockProcessingMode::BlockFinality,
         gc_block_processing_mode: worker::config::BlockProcessingMode::BlockFinality,

@@ -40,15 +40,39 @@ impl OnChainSender {
                 "Received message for on chain call: {:?}",
                 sender_data.on_chain_calldata
             );
+            let event_log_id = sender_data.event_log_id;
             if let Err(e) = self
                 .process_message(
                     sender_data.on_chain_calldata,
-                    sender_data.event_log_id,
+                    event_log_id,
                     &sender_data.stage,
                 )
                 .await
             {
-                tracing::error!("Error processing message: {}", e);
+                tracing::error!(
+                    "Error processing message for event_log id {}: {}",
+                    event_log_id,
+                    e
+                );
+
+                // The row is still claimed (`is_processed = 'true'`): the
+                // processor set it on claim and only the terminal branches
+                // inside `process_message` clear it. An error that propagates
+                // out — a failed view call, an RPC connect failure, a missing
+                // key — skipped those branches, so without this the row sits
+                // claimed forever, never re-claimed and never deleted. Release
+                // it back into the claimable pool under the ordinary
+                // MAX_RETRY_COUNT ceiling, so a transient failure heals itself
+                // and a permanent one parks the row for an operator instead of
+                // stranding it silently.
+                if let Err(db_err) = self.increment_retry_count(event_log_id).await {
+                    tracing::error!(
+                        "Failed to release event_log id {} after a processing error: {}. \
+                         The row stays claimed and needs manual intervention",
+                        event_log_id,
+                        db_err
+                    );
+                }
             }
         }
     }
@@ -108,6 +132,8 @@ impl OnChainSender {
                         "AMB_ETH: affirmation already signed by validator {}, skipping",
                         sender_addr
                     );
+                    // Delete the event log since this validator already signed
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 

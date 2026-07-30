@@ -126,23 +126,148 @@ mod tests {
     #[test]
     fn test_config_invalid_poll_interval_uses_default() {
         let _lock = env_lock();
-        // Clear environment to ensure test isolation
+
+        // A malformed value must land on the same default as an unset one —
+        // otherwise the cadence appears nowhere in the operator's config.
+        for bad in ["invalid", "0", "-5", "  "] {
+            // Clear environment to ensure test isolation
+            std::env::remove_var("POLL_INTERVAL_SECS");
+            std::env::remove_var("MAX_RETRY_COUNT");
+
+            std::env::set_var("ETH_RPC", "https://eth.example.com");
+            std::env::set_var("GC_RPC", "https://gc.example.com");
+            std::env::set_var("ETH_BC_RPC", "https://eth-beacon.example.com");
+            std::env::set_var("GC_BC_RPC", "https://gc-beacon.example.com");
+            std::env::set_var("POLL_INTERVAL_SECS", bad);
+
+            let config = Config::from_env().unwrap();
+
+            assert_eq!(
+                config.poll_interval_secs,
+                crate::config::DEFAULT_POLL_INTERVAL_SECS,
+                "POLL_INTERVAL_SECS='{}' should fall back to the default",
+                bad
+            );
+            assert_eq!(config.poll_interval_secs, 10);
+        }
+
+        // Cleanup
         std::env::remove_var("POLL_INTERVAL_SECS");
+    }
+
+    #[test]
+    fn test_config_default_max_retry_count() {
+        let _lock = env_lock();
+        set_required_env_vars();
         std::env::remove_var("MAX_RETRY_COUNT");
 
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(
+            config.max_retry_count,
+            crate::config::DEFAULT_MAX_RETRY_COUNT
+        );
+        assert_eq!(config.max_retry_count, 5);
+    }
+
+    #[test]
+    fn test_config_custom_max_retry_count() {
+        let _lock = env_lock();
+        set_required_env_vars();
+        std::env::set_var("MAX_RETRY_COUNT", "12");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.max_retry_count, 12);
+
+        // Cleanup
+        std::env::remove_var("MAX_RETRY_COUNT");
+    }
+
+    #[test]
+    fn test_config_invalid_max_retry_count_uses_default() {
+        let _lock = env_lock();
+
+        // Zero would stall the pipeline outright — no row would ever be
+        // claimed — so it is rejected the same way an unparseable value is.
+        for bad in ["invalid", "0", "-5", "  "] {
+            set_required_env_vars();
+            std::env::set_var("MAX_RETRY_COUNT", bad);
+
+            let config = Config::from_env().unwrap();
+
+            assert_eq!(
+                config.max_retry_count,
+                crate::config::DEFAULT_MAX_RETRY_COUNT,
+                "MAX_RETRY_COUNT='{}' should fall back to the default",
+                bad
+            );
+        }
+
+        // Cleanup
+        std::env::remove_var("MAX_RETRY_COUNT");
+    }
+
+    /// Set the env vars `Config::from_env` requires, and clear the fcr check
+    /// interval so each case below starts from a known state.
+    fn set_required_env_vars() {
+        std::env::remove_var("FCR_CHECK_INTERVAL_SECS");
         std::env::set_var("ETH_RPC", "https://eth.example.com");
         std::env::set_var("GC_RPC", "https://gc.example.com");
         std::env::set_var("ETH_BC_RPC", "https://eth-beacon.example.com");
         std::env::set_var("GC_BC_RPC", "https://gc-beacon.example.com");
-        std::env::set_var("POLL_INTERVAL_SECS", "invalid");
+    }
+
+    #[test]
+    fn test_config_default_fcr_check_interval() {
+        let _lock = env_lock();
+        set_required_env_vars();
 
         let config = Config::from_env().unwrap();
 
-        // Should fall back to default value of 5 when parse fails
-        assert_eq!(config.poll_interval_secs, 5);
+        assert_eq!(
+            config.fcr_check_interval_secs,
+            crate::config::DEFAULT_FCR_CHECK_INTERVAL_SECS
+        );
+        assert_eq!(config.fcr_check_interval_secs, 30);
+    }
+
+    #[test]
+    fn test_config_custom_fcr_check_interval() {
+        let _lock = env_lock();
+        set_required_env_vars();
+        std::env::set_var("FCR_CHECK_INTERVAL_SECS", "5");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.fcr_check_interval_secs, 5);
 
         // Cleanup
-        std::env::remove_var("POLL_INTERVAL_SECS");
+        std::env::remove_var("FCR_CHECK_INTERVAL_SECS");
+    }
+
+    #[test]
+    fn test_config_invalid_fcr_check_interval_uses_default() {
+        let _lock = env_lock();
+
+        // Zero would turn the revalidation loop into a hot loop, so it is
+        // rejected the same way an unparseable value is.
+        for bad in ["invalid", "0", "-5", "  "] {
+            set_required_env_vars();
+            std::env::set_var("FCR_CHECK_INTERVAL_SECS", bad);
+
+            let config = Config::from_env().unwrap();
+
+            assert_eq!(
+                config.fcr_check_interval_secs,
+                crate::config::DEFAULT_FCR_CHECK_INTERVAL_SECS,
+                "FCR_CHECK_INTERVAL_SECS='{}' should fall back to the default",
+                bad
+            );
+        }
+
+        // Cleanup
+        std::env::remove_var("FCR_CHECK_INTERVAL_SECS");
     }
 
     #[test]
