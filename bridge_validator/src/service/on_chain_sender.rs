@@ -9,7 +9,7 @@ use crate::service::msg_processor::SenderData;
 
 use alloy::{
     hex,
-    primitives::{keccak256, Address, Bytes, FixedBytes, U256},
+    primitives::{address, keccak256, Address, Bytes, FixedBytes, U256},
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
 };
@@ -17,6 +17,18 @@ use alloy::{
 use sqlx::PgPool;
 use tokio::sync::mpsc::Receiver;
 use tracing;
+
+/// Timing-harness target — the `EventAccountingContract` ("contract K") that
+/// accepts the same entrypoints as the Home bridges, does nothing, and emits a
+/// receipt an off-chain indexer timestamps.
+///
+/// Only the state-changing call is redirected here. K implements none of the
+/// bridge's view functions and has no fallback, so every pre-flight read must
+/// stay on the real bridge at `contract_address` or it reverts with empty data.
+///
+/// K's `bridgeValidator` is immutable: it only accepts calls from the address
+/// passed to its constructor, so the validator key must match that address.
+const RECEIPT_CONTRACT: Address = address!("0x7B231f6DEA3522E9d92497D2ADE04bD2bFB07051");
 
 pub struct OnChainSender {
     config: Config,
@@ -110,6 +122,7 @@ impl OnChainSender {
                     .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                 let bridge_instance = AMB_BRIDGE::new(contract_address, provider.clone());
+                let receipt_instance = AMB_BRIDGE::new(RECEIPT_CONTRACT, provider.clone());
 
                 // Compute hashMsg = keccak256(abi.encodePacked(message))
                 let hash_msg = keccak256(&calldata.message);
@@ -159,7 +172,7 @@ impl OnChainSender {
                 }
 
                 // Execute the affirmation transaction
-                match bridge_instance
+                match receipt_instance
                     .executeAffirmation(calldata.message)
                     .send()
                     .await
@@ -221,6 +234,7 @@ impl OnChainSender {
                     .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                 let bridge_instance = AMB_BRIDGE::new(contract_address, provider.clone());
+                let receipt_instance = AMB_BRIDGE::new(RECEIPT_CONTRACT, provider.clone());
 
                 let required: U256 = bridge_instance
                     .requiredSignatures()
@@ -273,7 +287,7 @@ impl OnChainSender {
 
                     // Submit the signature transaction
                     let submit_result = async {
-                        let submit_signature_tx = bridge_instance
+                        let submit_signature_tx = receipt_instance
                             .submitSignature(calldata.signature, calldata.message.clone())
                             .send()
                             .await
@@ -430,7 +444,8 @@ impl OnChainSender {
                     .await
                     .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
-                let bridge_instance = XDAI_BRIDGE::new(contract_address, provider);
+                let bridge_instance = XDAI_BRIDGE::new(contract_address, provider.clone());
+                let receipt_instance = XDAI_BRIDGE::new(RECEIPT_CONTRACT, provider);
 
                 // bytes32 hashMsg = keccak256(abi.encodePacked(recipient, value, nonce));
                 let mut buf = Vec::with_capacity(20 + 32 + 32);
@@ -486,7 +501,7 @@ impl OnChainSender {
                 }
 
                 // Execute the affirmation transaction
-                match bridge_instance
+                match receipt_instance
                     .executeAffirmation(calldata.recipient, calldata.value, calldata.nonce)
                     .send()
                     .await
@@ -548,6 +563,7 @@ impl OnChainSender {
                     .map_err(|e| BridgeValidatorError::RpcConnect(e.to_string()))?;
 
                 let bridge_instance = XDAI_BRIDGE::new(contract_address, provider.clone());
+                let receipt_instance = XDAI_BRIDGE::new(RECEIPT_CONTRACT, provider.clone());
 
                 let required: U256 = bridge_instance
                     .requiredSignatures()
@@ -600,7 +616,7 @@ impl OnChainSender {
 
                     // Submit the signature transaction
                     let submit_result = async {
-                        let submit_signature_tx = bridge_instance
+                        let submit_signature_tx = receipt_instance
                             .submitSignature(calldata.signature, calldata.message.clone())
                             .send()
                             .await
