@@ -343,14 +343,16 @@ impl OnChainSender {
                             AMB_BRIDGE::new(self.config.eth_amb_bridge_address, eth_provider);
 
                         tracing::debug!(
-                            "Calling safeExecuteSignaturesWithGasLimit with message (len={}): 0x{}, signatures (len={}): 0x{}, gas: 1000000",
+                            "Calling safeExecuteSignaturesWithAutoGasLimit with message (len={}): 0x{}, signatures (len={}): 0x{}",
                             calldata.message.len(),
                             hex::encode(&calldata.message),
                             signatures.len(),
                             hex::encode(&signatures)
                         );
 
-                        // AMB uses safeExecuteSignaturesWithGasLimit
+                        // AMB uses safeExecuteSignaturesWithAutoGasLimit: the contract forwards the
+                        // remaining transaction gas to the inner message call instead of using the
+                        // gasLimit encoded in the message header.
                         match foreign_bridge_instance
                             .safeExecuteSignaturesWithAutoGasLimit(
                                 calldata.message.clone(),
@@ -363,8 +365,10 @@ impl OnChainSender {
                                 match execute_signature_tx.get_receipt().await {
                                     Ok(execute_signature_receipt) => {
                                         tracing::info!(
-                                            "AMB executeSignatures on foreign chain: {:?}",
-                                            execute_signature_receipt.transaction_hash
+                                            "AMB executeSignatures on foreign chain: {:?}, gas_used: {}, effective_gas_price: {}",
+                                            execute_signature_receipt.transaction_hash,
+                                            execute_signature_receipt.gas_used,
+                                            execute_signature_receipt.effective_gas_price
                                         );
                                         self.delete_event_log(event_log_id).await?;
                                     }
