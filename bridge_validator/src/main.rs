@@ -8,6 +8,7 @@ use crate::contracts::OnChainCallData;
 use crate::error::BridgeValidatorError;
 use crate::rpc_provider::setup_provider;
 use crate::service::event_indexer::EventIndexer;
+use crate::service::fcr_checker::FcrChecker;
 use crate::service::msg_processor::{MessageProcessor, SenderData};
 use crate::service::on_chain_sender::OnChainSender;
 
@@ -15,20 +16,26 @@ use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::{mpsc, watch};
 use tracing;
-use tracing_subscriber::{self, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<(), BridgeValidatorError> {
-    // Initialize tracing
     tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     dotenv::dotenv().ok();
-    let config = Config::from_env().map_err(BridgeValidatorError::Config)?;
+    let mut config = Config::from_env().map_err(BridgeValidatorError::Config)?;
 
-    // Initialize database connection pool
+    // Verify at boot that every chain configured for fcr can actually be
+    // served `safe` by its RPC array. A safe-incapable RPC would otherwise
+    // degrade that chain to finality for the whole process lifetime while the
+    // operator believes they have ~12s confirmation. Chains that fail are
+    // downgraded explicitly and loudly here.
+    crate::service::safe::run_fcr_preflight(&mut config, &reqwest::Client::new()).await;
+    let config = config;
+
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file");
 
@@ -40,7 +47,6 @@ async fn main() -> Result<(), BridgeValidatorError> {
 
     tracing::info!("Database connection established");
 
-    // Run migrations automatically
     tracing::info!("Running database migrations...");
     match sqlx::migrate!("./migrations").run(&pool).await {
         Ok(_) => tracing::info!("Migrations completed successfully"),
@@ -49,13 +55,6 @@ async fn main() -> Result<(), BridgeValidatorError> {
             return Err(e.into());
         }
     }
-    // Verify the table exists
-    let table_check = sqlx::query("SELECT to_regclass('public.event_logs')")
-        .fetch_one(&pool)
-        .await?;
-    tracing::info!("Verified event_logs table exists");
-
-    // Add a small delay to ensure everything is ready
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // Shutdown signal: broadcast to all services on SIGTERM/SIGINT
@@ -86,7 +85,6 @@ async fn main() -> Result<(), BridgeValidatorError> {
         let _ = shutdown_tx.send(true);
     });
 
-    // Initiating services
     let indexer_eth_amb = EventIndexer::new(
         config.clone(),
         setup_provider(&config, "eth").await?,
@@ -129,12 +127,24 @@ async fn main() -> Result<(), BridgeValidatorError> {
 
     let (tx, rx) = mpsc::channel::<SenderData>(32);
 
-    let msg_processor_1 =
-        MessageProcessor::new(config.clone(), pool.clone(), tx.clone(), shutdown_rx.clone());
-    let msg_processor_2 =
-        MessageProcessor::new(config.clone(), pool.clone(), tx.clone(), shutdown_rx.clone());
+    let msg_processor_1 = MessageProcessor::new(
+        config.clone(),
+        pool.clone(),
+        tx.clone(),
+        shutdown_rx.clone(),
+    );
+    let msg_processor_2 = MessageProcessor::new(
+        config.clone(),
+        pool.clone(),
+        tx.clone(),
+        shutdown_rx.clone(),
+    );
 
     let on_chain_sender = OnChainSender::new(config.clone(), pool.clone(), rx);
+
+    // Re-checks every safe-processed block once it finalizes. Exits immediately
+    // when no chain is in fcr mode.
+    let fcr_checker = FcrChecker::new(config.clone(), pool.clone(), shutdown_rx.clone());
 
     // Drop the original sender so the channel closes once both MessageProcessors stop.
     // OnChainSender will drain remaining messages, then exit.
@@ -147,7 +157,8 @@ async fn main() -> Result<(), BridgeValidatorError> {
         indexer_gc_xdai.start(),
         msg_processor_1.start(),
         msg_processor_2.start(),
-        on_chain_sender.start()
+        on_chain_sender.start(),
+        fcr_checker.start()
     );
 
     tracing::info!("All services stopped, shutting down");

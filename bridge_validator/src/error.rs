@@ -54,6 +54,10 @@ pub enum BridgeValidatorError {
     EmptyElResponse,
     #[error("all RPC endpoints failed for finalized block")]
     AllRpcsFailedForFinalizedBlock,
+    #[error("all RPC endpoints failed for safe block")]
+    AllRpcsFailedForSafeBlock,
+    #[error("all RPC endpoints failed to look up block {0}")]
+    AllRpcsFailedForBlockLookup(i64),
 
     #[error("RPC error: {0}")]
     Rpc(String),

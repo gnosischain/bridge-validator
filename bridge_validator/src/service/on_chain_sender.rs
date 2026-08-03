@@ -40,11 +40,39 @@ impl OnChainSender {
                 "Received message for on chain call: {:?}",
                 sender_data.on_chain_calldata
             );
+            let event_log_id = sender_data.event_log_id;
             if let Err(e) = self
-                .process_message(sender_data.on_chain_calldata, sender_data.event_log_id, &sender_data.stage)
+                .process_message(
+                    sender_data.on_chain_calldata,
+                    event_log_id,
+                    &sender_data.stage,
+                )
                 .await
             {
-                tracing::error!("Error processing message: {}", e);
+                tracing::error!(
+                    "Error processing message for event_log id {}: {}",
+                    event_log_id,
+                    e
+                );
+
+                // The row is still claimed (`is_processed = 'true'`): the
+                // processor set it on claim and only the terminal branches
+                // inside `process_message` clear it. An error that propagates
+                // out — a failed view call, an RPC connect failure, a missing
+                // key — skipped those branches, so without this the row sits
+                // claimed forever, never re-claimed and never deleted. Release
+                // it back into the claimable pool under the ordinary
+                // MAX_RETRY_COUNT ceiling, so a transient failure heals itself
+                // and a permanent one parks the row for an operator instead of
+                // stranding it silently.
+                if let Err(db_err) = self.increment_retry_count(event_log_id).await {
+                    tracing::error!(
+                        "Failed to release event_log id {} after a processing error: {}. \
+                         The row stays claimed and needs manual intervention",
+                        event_log_id,
+                        db_err
+                    );
+                }
             }
         }
     }
@@ -64,7 +92,6 @@ impl OnChainSender {
                 tracing::debug!("Message length: {} bytes", calldata.message.len());
                 tracing::debug!("Message hex: 0x{}", hex::encode(&calldata.message));
 
-                // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
                     .amb_validator_private_key
@@ -104,6 +131,7 @@ impl OnChainSender {
                         "AMB_ETH: affirmation already signed by validator {}, skipping",
                         sender_addr
                     );
+                    self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
@@ -115,7 +143,11 @@ impl OnChainSender {
                     .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Check 3: signed < requiredSignatures()
-                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                let required: U256 = bridge_instance
+                    .requiredSignatures()
+                    .call()
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                 if signed >= required {
                     tracing::info!(
                         "AMB_ETH: message already has {signed} >= required {required} affirmations, skipping"
@@ -124,7 +156,6 @@ impl OnChainSender {
                     return Ok(());
                 }
 
-                // Execute the affirmation transaction
                 match bridge_instance
                     .executeAffirmation(calldata.message)
                     .send()
@@ -149,7 +180,10 @@ impl OnChainSender {
                         }
                     }
                     Err(e) => {
-                        tracing::error!("AMB: Failed to send executeAffirmation transaction: {}", e);
+                        tracing::error!(
+                            "AMB: Failed to send executeAffirmation transaction: {}",
+                            e
+                        );
                         self.increment_retry_count(event_log_id).await?;
                     }
                 }
@@ -166,7 +200,6 @@ impl OnChainSender {
                 tracing::debug!("Signature length: {} bytes", calldata.signature.len());
                 tracing::debug!("Signature hex: 0x{}", hex::encode(&calldata.signature));
 
-                // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
                     .amb_validator_private_key
@@ -185,7 +218,11 @@ impl OnChainSender {
 
                 let bridge_instance = AMB_BRIDGE::new(contract_address, provider.clone());
 
-                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                let required: U256 = bridge_instance
+                    .requiredSignatures()
+                    .call()
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Stage "home": run pre-flight checks and submitSignature on home chain
                 if stage != "foreign" {
@@ -200,7 +237,11 @@ impl OnChainSender {
                     let hash_sender = keccak256(&buf);
 
                     // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
-                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                    let signed: U256 = bridge_instance
+                        .numMessagesSigned(hash_msg)
+                        .call()
+                        .await
+                        .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     // Check 1: require(!isAlreadyProcessed(signed));
                     if signed >= required {
@@ -212,8 +253,11 @@ impl OnChainSender {
                     }
 
                     // Check 2: require(!bridge_instance.messagesSigned(hashSender));
-                    let already_signed_by_validator =
-                        bridge_instance.messagesSigned(hash_sender).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                    let already_signed_by_validator = bridge_instance
+                        .messagesSigned(hash_sender)
+                        .call()
+                        .await
+                        .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                     if already_signed_by_validator {
                         tracing::info!(
                             "AMB_GC: validator {} already signed this message, skipping",
@@ -223,21 +267,21 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Submit the signature transaction
                     let submit_result = async {
                         let submit_signature_tx = bridge_instance
                             .submitSignature(calldata.signature, calldata.message.clone())
                             .send()
                             .await
                             .map_err(|e| {
-                                tracing::error!("Failed to send submitSignature transaction: {}", e);
+                                tracing::error!(
+                                    "Failed to send submitSignature transaction: {}",
+                                    e
+                                );
                                 BridgeValidatorError::TxSubmit(e.to_string())
                             })?;
 
-                        let submit_signature_receipt = submit_signature_tx
-                            .get_receipt()
-                            .await
-                            .map_err(|e| {
+                        let submit_signature_receipt =
+                            submit_signature_tx.get_receipt().await.map_err(|e| {
                                 tracing::error!("Failed to get receipt for submitSignature: {}", e);
                                 BridgeValidatorError::TxReceipt(e.to_string())
                             })?;
@@ -250,7 +294,6 @@ impl OnChainSender {
                     }
                     .await;
 
-                    // If submit failed, increment retry count and return
                     if submit_result.is_err() {
                         self.increment_retry_count(event_log_id).await?;
                         return Ok(());
@@ -262,7 +305,6 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Mark stage as 'foreign' before attempting foreign execution
                     self.update_stage(event_log_id, "foreign").await?;
                 }
 
@@ -294,14 +336,16 @@ impl OnChainSender {
                             AMB_BRIDGE::new(self.config.eth_amb_bridge_address, eth_provider);
 
                         tracing::debug!(
-                            "Calling safeExecuteSignaturesWithGasLimit with message (len={}): 0x{}, signatures (len={}): 0x{}, gas: 1000000",
+                            "Calling safeExecuteSignaturesWithAutoGasLimit with message (len={}): 0x{}, signatures (len={}): 0x{}",
                             calldata.message.len(),
                             hex::encode(&calldata.message),
                             signatures.len(),
                             hex::encode(&signatures)
                         );
 
-                        // AMB uses safeExecuteSignaturesWithGasLimit
+                        // AMB uses safeExecuteSignaturesWithAutoGasLimit: the contract forwards the
+                        // remaining transaction gas to the inner message call instead of using the
+                        // gasLimit encoded in the message header.
                         match foreign_bridge_instance
                             .safeExecuteSignaturesWithAutoGasLimit(
                                 calldata.message.clone(),
@@ -314,8 +358,10 @@ impl OnChainSender {
                                 match execute_signature_tx.get_receipt().await {
                                     Ok(execute_signature_receipt) => {
                                         tracing::info!(
-                                            "AMB executeSignatures on foreign chain: {:?}",
-                                            execute_signature_receipt.transaction_hash
+                                            "AMB executeSignatures on foreign chain: {:?}, gas_used: {}, effective_gas_price: {}",
+                                            execute_signature_receipt.transaction_hash,
+                                            execute_signature_receipt.gas_used,
+                                            execute_signature_receipt.effective_gas_price
                                         );
                                         self.delete_event_log(event_log_id).await?;
                                     }
@@ -364,7 +410,6 @@ impl OnChainSender {
                 tracing::debug!("Value: {:?}", calldata.value);
                 tracing::debug!("Nonce: 0x{}", hex::encode(calldata.nonce));
 
-                // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
                     .xdai_validator_private_key
@@ -398,7 +443,7 @@ impl OnChainSender {
                 buf2.extend_from_slice(hash_msg.as_slice());
                 let hash_sender = keccak256(&buf2);
 
-                // Check 2:   require(!bridge_instance.affirmationsSigned(hashSender));
+                // Check 1: require(!bridge_instance.affirmationsSigned(hashSender));
                 let already_affirmed = bridge_instance
                     .affirmationsSigned(hash_sender)
                     .call()
@@ -409,12 +454,11 @@ impl OnChainSender {
                         "XDAI_ETH: affirmation already signed by validator {}, skipping",
                         sender_addr
                     );
-                    // Delete the event log since this validator already signed
                     self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                // signed = bridge_instance.numAffirmationsSigned(hashMsg);
+                // Check 2: signed = bridge_instance.numAffirmationsSigned(hashMsg);
                 let signed: U256 = bridge_instance
                     .numAffirmationsSigned(hash_msg)
                     .call()
@@ -422,17 +466,19 @@ impl OnChainSender {
                     .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Check 3: signed < requiredSignatures()
-                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                let required: U256 = bridge_instance
+                    .requiredSignatures()
+                    .call()
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                 if signed >= required {
                     tracing::info!(
                         "XDAI_ETH: message already has {signed} >= required {required} affirmations, skipping"
                     );
-                    // Delete the event log since it's already processed
                     self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                // Execute the affirmation transaction
                 match bridge_instance
                     .executeAffirmation(calldata.recipient, calldata.value, calldata.nonce)
                     .send()
@@ -457,7 +503,10 @@ impl OnChainSender {
                         }
                     }
                     Err(e) => {
-                        tracing::error!("xDAI: Failed to send executeAffirmation transaction: {}", e);
+                        tracing::error!(
+                            "xDAI: Failed to send executeAffirmation transaction: {}",
+                            e
+                        );
                         self.increment_retry_count(event_log_id).await?;
                     }
                 }
@@ -493,7 +542,11 @@ impl OnChainSender {
 
                 let bridge_instance = XDAI_BRIDGE::new(contract_address, provider.clone());
 
-                let required: U256 = bridge_instance.requiredSignatures().call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                let required: U256 = bridge_instance
+                    .requiredSignatures()
+                    .call()
+                    .await
+                    .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                 // Stage "home": run pre-flight checks and submitSignature on home chain
                 if stage != "foreign" {
@@ -508,7 +561,11 @@ impl OnChainSender {
                     let hash_sender = keccak256(&buf);
 
                     // uint256 signed = bridge_instance.numMessagesSigned(hashMsg);
-                    let signed: U256 = bridge_instance.numMessagesSigned(hash_msg).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                    let signed: U256 = bridge_instance
+                        .numMessagesSigned(hash_msg)
+                        .call()
+                        .await
+                        .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     // Check 1: require(!isAlreadyProcessed(signed));
                     if signed >= required {
@@ -520,8 +577,11 @@ impl OnChainSender {
                     }
 
                     // Check 2: require(!bridge_instance.messagesSigned(hashSender));
-                    let already_signed_by_validator =
-                        bridge_instance.messagesSigned(hash_sender).call().await.map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
+                    let already_signed_by_validator = bridge_instance
+                        .messagesSigned(hash_sender)
+                        .call()
+                        .await
+                        .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
                     if already_signed_by_validator {
                         tracing::info!(
                             "XDAI_GC: validator {} already signed this message, skipping",
@@ -531,21 +591,21 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Submit the signature transaction
                     let submit_result = async {
                         let submit_signature_tx = bridge_instance
                             .submitSignature(calldata.signature, calldata.message.clone())
                             .send()
                             .await
                             .map_err(|e| {
-                                tracing::error!("Failed to send submitSignature transaction: {}", e);
+                                tracing::error!(
+                                    "Failed to send submitSignature transaction: {}",
+                                    e
+                                );
                                 BridgeValidatorError::TxSubmit(e.to_string())
                             })?;
 
-                        let submit_signature_receipt = submit_signature_tx
-                            .get_receipt()
-                            .await
-                            .map_err(|e| {
+                        let submit_signature_receipt =
+                            submit_signature_tx.get_receipt().await.map_err(|e| {
                                 tracing::error!("Failed to get receipt for submitSignature: {}", e);
                                 BridgeValidatorError::TxReceipt(e.to_string())
                             })?;
@@ -558,7 +618,6 @@ impl OnChainSender {
                     }
                     .await;
 
-                    // If submit failed, increment retry count and return
                     if submit_result.is_err() {
                         self.increment_retry_count(event_log_id).await?;
                         return Ok(());
@@ -570,7 +629,6 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Mark stage as 'foreign' before attempting foreign execution
                     self.update_stage(event_log_id, "foreign").await?;
                 }
 
@@ -601,7 +659,6 @@ impl OnChainSender {
                         .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     if signatures.len() == (2 + 65 * required.to::<usize>() - 1) {
-                        // Create provider for Ethereum (foreign chain)
                         let eth_provider = ProviderBuilder::new()
                             .wallet(pk_signer.clone())
                             .connect(self.config.get_eth_rpc())
@@ -716,7 +773,11 @@ impl OnChainSender {
     }
 
     /// Update the processing stage for an event log
-    async fn update_stage(&self, event_log_id: i32, stage: &str) -> Result<(), BridgeValidatorError> {
+    async fn update_stage(
+        &self,
+        event_log_id: i32,
+        stage: &str,
+    ) -> Result<(), BridgeValidatorError> {
         sqlx::query(
             r#"
             UPDATE event_logs
@@ -729,12 +790,19 @@ impl OnChainSender {
         .execute(&self.db_pool)
         .await?;
 
-        tracing::info!("Updated stage to '{}' for event_log id: {}", stage, event_log_id);
+        tracing::info!(
+            "Updated stage to '{}' for event_log id: {}",
+            stage,
+            event_log_id
+        );
         Ok(())
     }
 
     /// Increment retry count for an event log in the database
-    pub async fn increment_retry_count(&self, event_log_id: i32) -> Result<(), BridgeValidatorError> {
+    pub async fn increment_retry_count(
+        &self,
+        event_log_id: i32,
+    ) -> Result<(), BridgeValidatorError> {
         sqlx::query(
             r#"
             UPDATE event_logs
