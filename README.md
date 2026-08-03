@@ -34,14 +34,19 @@ flowchart TB
 
     subgraph DB["PostgreSQL"]
         EL[(event_logs table)]
+        FP[(fcr_false_positives table)]
     end
 
     subgraph MsgProcessors["Message Processors (2 instances)"]
-        MP["Read unprocessed events<br/>Check block finality<br/>Decode & sign messages"]
+        MP["Read unprocessed events<br/>Decode & sign messages"]
     end
 
     subgraph Sender["On-Chain Sender (1 instance)"]
         OCS["Pre-flight duplicate checks<br/>Submit transactions<br/>Handle home/foreign stages"]
+    end
+
+    subgraph Checker["FCR Checker (1 instance, fcr mode only)"]
+        FCR["Re-check safe-processed blocks<br/>once they finalize"]
     end
 
     ETH -->|poll logs| IE1
@@ -58,8 +63,12 @@ flowchart TB
     MP -->|"mpsc channel (cap 32)"| OCS
 
     OCS -->|executeAffirmation / submitSignature| GC
-    OCS -->|executeSignatures| ETH
+    OCS -->|"safeExecuteSignaturesWithAutoGasLimit / executeSignatures"| ETH
     OCS -->|"delete / retry"| EL
+
+    EL -->|"fcr_status='pending' and finalized"| FCR
+    FCR -->|"fcr_status → confirmed / reverted"| EL
+    FCR -->|insert on hash mismatch| FP
 ```
 
 ### Data Flow
@@ -88,16 +97,18 @@ In the default `block-finality` mode the bound is the latest finalized block, re
 
 ### Block processing modes
 
-The upper bound is selectable **per chain** via `ETH_BLOCK_PROCESSING_MODE` / `GC_BLOCK_PROCESSING_MODE`. All indexers on a chain share its mode. The default is `block-finality` everywhere, so no existing deployment changes behaviour without an explicit opt-in.
+The upper bound is selectable **per chain** via `ETH_BLOCK_PROCESSING_MODE` / `GC_BLOCK_PROCESSING_MODE`. All indexers on a chain share its mode.
 
-| Mode                       | Upper bound                            | Latency | Guarantee                                                                                |
-| -------------------------- | -------------------------------------- | ------- | ---------------------------------------------------------------------------------------- |
-| `block-finality` (default) | latest **finalized** block             | ~12.8m  | Economic finality — a stored row can never leave the canonical chain                     |
-| `fcr`                      | latest **safe** (fast-confirmed) block | ~12s    | Conditional (honest-majority, no slashing backing) — a safe block **can** be reorged out |
+**The two chains default differently.** Ethereum defaults to `fcr`: at ~12s versus ~12.8m, safe-block indexing is what makes ETH→GC relaying usable, and the reorg window it opens is closed after the fact by the FCR checker. Gnosis Chain defaults to `block-finality`, because GC→ETH is the signature-collection direction where this validator's signature is an irreversible commitment. Either chain can be set to either mode.
+
+| Mode                                | Upper bound                            | Latency | Guarantee                                                                                |
+| ----------------------------------- | -------------------------------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `block-finality` (GC default)       | latest **finalized** block             | ~12.8m  | Economic finality — a stored row can never leave the canonical chain                     |
+| `fcr` (ETH default)                 | latest **safe** (fast-confirmed) block | ~12s    | Conditional (honest-majority, no slashing backing) — a safe block **can** be reorged out |
 
 `fcr` mode resolves the bound with `eth_getBlockByNumber("safe", false)` (`service/safe.rs`). This lookup is **execution-layer only**: there is no Beacon API `safe` block id on any client, and an EL block hash must never be compared against a beacon block root.
 
-**Guarantee downgrade.** `fcr` mode deliberately opens a reorg window in the signing path — the validator signs messages from blocks that are fast-confirmed but not yet final. A signature cannot be un-signed, so this is an explicit, per-chain operator choice, appropriate for the same reasoning that applies to bridge transfers generally (fast, conditional) rather than to irreversible high-value settlement.
+**Guarantee downgrade.** `fcr` mode deliberately opens a reorg window in the signing path — the validator signs messages from blocks that are fast-confirmed but not yet final. A signature cannot be un-signed, so this is a per-chain choice, appropriate for the same reasoning that applies to bridge transfers generally (fast, conditional) rather than to irreversible high-value settlement. Because Ethereum defaults to `fcr`, set `ETH_BLOCK_PROCESSING_MODE=block-finality` explicitly if your deployment cannot accept that window.
 
 **Safe-support preflight.** Unlike `finalized`, the `safe` tag is not universally supported. At startup each fcr-configured chain probes its EL RPC array once and classifies every provider:
 
@@ -161,7 +172,7 @@ Loads all configuration from environment variables. Supports comma-separated RPC
 
 ## Prerequisites
 
-- **Rust** >= 1.93.0 (or use Docker)
+- **Rust** stable, 2021 edition (or use Docker — the build image is digest-pinned to a `rust:slim-bookworm` stable)
 - **PostgreSQL** >= 14
 - **SQLx CLI** (for offline query metadata): `cargo install sqlx-cli`
 - RPC endpoints for Ethereum and Gnosis Chain (execution layer; beacon chain optional but recommended)
@@ -190,13 +201,24 @@ cp .env.example .env
 | `GC_AMB_BRIDGE_ADDRESS`           | No       | `0x75Df5AF045d91108662D8080fD1FEFAd6aA0bb59` | AMB bridge contract on Gnosis Chain.                                                                                          |
 | `ETH_XDAI_BRIDGE_ADDRESS`         | No       | `0x4aa42145Aa6Ebf72e164C9bBC74fbD3788045016` | xDai bridge contract on Ethereum.                                                                                             |
 | `GC_XDAI_BRIDGE_ADDRESS`          | No       | `0x7301CFA0e1756B71869E93d4e4Dca5c7d0eb0AA6` | xDai bridge contract on Gnosis Chain.                                                                                         |
-| `ETH_BLOCK_PROCESSING_MODE`       | No       | `block-finality`                             | `fcr` \| `block-finality` — upper bound for the ETH-side indexers. See [Block processing modes](#block-processing-modes).     |
+| `AMB_BRIDGE_HELPER_ADDRESS`       | No       | `0x7d94ece17e81355326e3359115D4B02411825EdD` | Helper that collects aggregated signatures for AMB foreign execution.                                                         |
+| `XDAI_BRIDGE_HELPER_ADDRESS`      | No       | `0xe30269bc61E677cD60aD163a221e464B7022fbf5` | Helper that computes message hashes and collects signatures for xDai foreign execution.                                       |
+| `ETH_BLOCK_PROCESSING_MODE`       | No       | `fcr`                                        | `fcr` \| `block-finality` — upper bound for the ETH-side indexers. See [Block processing modes](#block-processing-modes).     |
 | `GC_BLOCK_PROCESSING_MODE`        | No       | `block-finality`                             | `fcr` \| `block-finality` — upper bound for the GC-side indexers. See [Block processing modes](#block-processing-modes).      |
 | `POLL_INTERVAL_SECS`              | No       | `10`                                         | Seconds between each event-indexer poll cycle.                                                                                |
-| `MAX_RETRY_COUNT`                 | No       | `5`                                          | Maximum retry attempts before an event is dropped.                                                                            |
+| `FCR_CHECK_INTERVAL_SECS`         | No       | `30`                                         | Seconds between FCR revalidation cycles. Only used when a chain is in `fcr` mode.                                             |
+| `MAX_BLOCK_RANGE`                 | No       | `2000`                                       | Largest block span per `eth_getLogs` call; wider catch-up ranges are split into consecutive chunks.                           |
+| `MAX_RETRY_COUNT`                 | No       | `5`                                          | Retry ceiling. A row that reaches it is no longer claimed, but is **not** deleted — see [Retry and Failure Handling](#retry-and-failure-handling). |
 | `XDAI_EXECUTE_MESSAGE_ON_FOREIGN` | No       | `false`                                      | Set to `true` to also execute xDai messages on the foreign chain (ETH) after submitting the signature on the home chain (GC). |
 | `AMB_EXECUTE_MESSAGE_ON_FOREIGN`  | No       | `false`                                      | Set to `true` to also execute AMB messages on the foreign chain (ETH) after submitting the signature on the home chain (GC).  |
 | `RUST_LOG`                        | No       | `info`                                       | Log level filter. Options: `error`, `warn`, `info`, `debug`, `trace`.                                                         |
+
+`POLL_INTERVAL_SECS`, `FCR_CHECK_INTERVAL_SECS`, `MAX_RETRY_COUNT` and `MAX_BLOCK_RANGE` share one
+parser: unset, empty, unparseable and `0` all fall back to the default above, and anything other
+than "unset" logs a warning.
+
+These defaults are the same whether you run the binary directly, via `docker compose`, or from
+`.env.example` — the three are kept in sync deliberately.
 
 ### Fallback RPC Example
 
@@ -266,10 +288,11 @@ docker build -f bridge_validator/Dockerfile -t bridge-validator .
 docker run --env-file .env bridge-validator
 ```
 
-The Dockerfile uses a multi-stage build:
+The Dockerfile uses a multi-stage build. Both base images are **pinned by digest** rather than by
+tag, so a rebuild resolves the exact base CI used:
 
-- **Build stage**: `rustlang/rust:1.93.0-slim-trixie` — compiles the release binary with `SQLX_OFFLINE=true`.
-- **Runtime stage**: `debian:sid-slim` — minimal image with only `ca-certificates` and `libssl3`.
+- **Build stage**: `rust:slim-bookworm@sha256:b5f842…` — compiles the release binary with `cargo build --release --locked` and `SQLX_OFFLINE=true`.
+- **Runtime stage**: `debian:bookworm-slim@sha256:0104b3…` — minimal image with only `ca-certificates` and `libssl3`, plus `RUST_LOG=info`.
 
 ## Database Schema
 
@@ -342,27 +365,27 @@ flowchart LR
 
 ### AMB_ETH (Ethereum to Gnosis Chain, AMB)
 
-1. Indexer detects `UserRequestForAffirmation` on the ETH AMB bridge.
-2. Processor verifies ETH block finality and decodes the message.
+1. Indexer detects `UserRequestForAffirmation` on the ETH AMB bridge (only up to the chain's upper-bound block — finalized, or safe in `fcr` mode).
+2. Processor claims the row and decodes the message. No signature is produced on this path.
 3. Sender calls `executeAffirmation(message)` on the GC AMB bridge.
 
 ### AMB_GC (Gnosis Chain to Ethereum, AMB)
 
-1. Indexer detects `UserRequestForSignature` on the GC AMB bridge.
-2. Processor verifies GC block finality, decodes the message, and signs it with `AMB_VALIDATOR_PRIV_KEY`.
+1. Indexer detects `UserRequestForSignature` on the GC AMB bridge (only up to the chain's upper-bound block — finalized, or safe in `fcr` mode).
+2. Processor claims the row, decodes the message, and signs it with `AMB_VALIDATOR_PRIV_KEY`.
 3. Sender calls `submitSignature(signature, message)` on the GC AMB bridge.
 4. If `AMB_EXECUTE_MESSAGE_ON_FOREIGN=true`: sender collects all validator signatures via `AMB_BRIDGE_HELPER.getSignatures()`, then calls `safeExecuteSignaturesWithAutoGasLimit(data, signatures)` on the ETH AMB bridge.
 
 ### XDAI_ETH (Ethereum to Gnosis Chain, xDai)
 
-1. Indexer detects `UserRequestForAffirmation` on the ETH xDai bridge.
-2. Processor verifies ETH block finality and decodes the recipient, value, and nonce.
+1. Indexer detects `UserRequestForAffirmation` on the ETH xDai bridge (only up to the chain's upper-bound block — finalized, or safe in `fcr` mode).
+2. Processor claims the row and decodes the recipient, value, and nonce. No signature is produced on this path.
 3. Sender calls `executeAffirmation(recipient, value, nonce)` on the GC xDai bridge.
 
 ### XDAI_GC (Gnosis Chain to Ethereum, xDai)
 
-1. Indexer detects `UserRequestForSignature` on the GC xDai bridge.
-2. Processor verifies GC block finality, constructs the message (`recipient + value + nonce + bridge_address + token_address`, 256-bit aligned), and signs it with `XDAI_VALIDATOR_PRIV_KEY`.
+1. Indexer detects `UserRequestForSignature` on the GC xDai bridge (only up to the chain's upper-bound block — finalized, or safe in `fcr` mode).
+2. Processor claims the row and constructs the 124-byte message — `recipient(20) + value(32) + nonce(32) + eth_xdai_bridge_address(20) + token_address(20)`, every field length validated before concatenation — then signs it with `XDAI_VALIDATOR_PRIV_KEY`.
 3. Sender calls `submitSignature(signature, message)` on the GC xDai bridge.
 4. If `XDAI_EXECUTE_MESSAGE_ON_FOREIGN=true`: sender gets the message hash via `XDAI_BRIDGE_HELPER.getMessageHash()`, collects signatures via `XDAI_BRIDGE_HELPER.getSignatures()`, then calls `executeSignatures(message, signatures)` on the ETH xDai bridge.
 
@@ -370,7 +393,7 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Unprocessed: Finalized event indexed
+    [*] --> Unprocessed: Event indexed<br/>(finalized, or safe in fcr mode)
     Unprocessed --> Processing: Processor claims row<br/>(FOR UPDATE SKIP LOCKED)
     Processing --> Signing: Decode event<br/>(sign if GC→ETH)
 
@@ -382,14 +405,14 @@ stateDiagram-v2
 
     OnChainSender --> RetryIncrement: Transaction fails
     RetryIncrement --> Unprocessed: retry_count < MAX_RETRY_COUNT
-    RetryIncrement --> Dropped: retry_count >= MAX_RETRY_COUNT
+    RetryIncrement --> Abandoned: retry_count >= MAX_RETRY_COUNT<br/>(row kept, never claimed again)
 
     Deleted --> [*]
-    Dropped --> [*]
 ```
 
-- **Finality not reached**: Event is set back to `is_processed='false'` and retried on the next processor cycle.
 - **Transaction failure**: `retry_count` is incremented and `is_processed` is reset to `'false'`. The event will be retried until `retry_count` reaches `MAX_RETRY_COUNT` (default: 5).
+- **Retry ceiling**: a row at the ceiling is **not deleted**. It stays in `event_logs` outside the claim query's `retry_count < MAX_RETRY_COUNT` filter, as a permanent record of a failed message for manual inspection. Raising `MAX_RETRY_COUNT` brings such rows back into the claim set on the next pass.
+- **No backoff**: a failing row is re-claimed on the next processor pass, so a permanently failing message burns its whole retry budget in a burst and then parks at the ceiling.
 - **Two-stage flow**: When foreign execution is enabled, a successful `submitSignature` on the home chain updates the row's `stage` to `'foreign'` rather than deleting it, so the foreign execution is retried independently.
 - **Duplicate prevention**: Pre-flight contract calls check if the validator has already signed/affirmed, and whether the required signature threshold has already been met.
 

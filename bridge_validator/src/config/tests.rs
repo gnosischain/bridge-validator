@@ -406,24 +406,26 @@ mod tests {
         std::env::set_var("GC_BC_RPC", "https://gc-beacon.example.com");
     }
 
-    // Existing deployments set neither mode var and must keep the conservative
-    // finalized-only behaviour.
+    // The two chains do not share a default: ETH runs fcr so ETH->GC relaying is
+    // not gated on ~12.8m finality, GC stays conservative because that is the
+    // direction where this validator's signature is an irreversible commitment.
     #[test]
-    fn test_block_processing_mode_defaults_to_block_finality() {
+    fn test_block_processing_mode_defaults_are_per_chain() {
         let _lock = env_lock();
         set_base_env();
 
         let config = Config::from_env().unwrap();
 
-        assert_eq!(
-            config.eth_block_processing_mode,
-            BlockProcessingMode::BlockFinality
-        );
+        assert_eq!(config.eth_block_processing_mode, BlockProcessingMode::Fcr);
         assert_eq!(
             config.gc_block_processing_mode,
             BlockProcessingMode::BlockFinality
         );
-        assert!(config.fcr_chains().is_empty());
+
+        // Only the fcr chain is handed to the checker.
+        let fcr_chains = config.fcr_chains();
+        assert_eq!(fcr_chains.len(), 1);
+        assert_eq!(fcr_chains[0].0, "eth");
     }
 
     #[test]
@@ -494,15 +496,19 @@ mod tests {
         let _lock = env_lock();
         set_base_env();
         std::env::set_var("ETH_BLOCK_PROCESSING_MODE", "");
+        std::env::set_var("GC_BLOCK_PROCESSING_MODE", "");
 
         let config = Config::from_env().unwrap();
 
+        // Empty must land on each chain's own default, not on a shared one.
+        assert_eq!(config.eth_block_processing_mode, BlockProcessingMode::Fcr);
         assert_eq!(
-            config.eth_block_processing_mode,
+            config.gc_block_processing_mode,
             BlockProcessingMode::BlockFinality
         );
 
         std::env::remove_var("ETH_BLOCK_PROCESSING_MODE");
+        std::env::remove_var("GC_BLOCK_PROCESSING_MODE");
     }
 
     #[test]

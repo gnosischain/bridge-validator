@@ -34,12 +34,15 @@ impl BlockProcessingMode {
 
     /// Parse a mode from its env-var spelling. Unknown values are rejected
     /// rather than silently defaulted: a typo'd `ETH_BLOCK_PROCESSING_MODE`
-    /// must not quietly hand back the conservative mode an operator believes
-    /// they turned off.
-    fn parse(var: &str, value: &str) -> Result<Self, String> {
+    /// must not quietly hand back a mode an operator believes they turned off.
+    ///
+    /// The caller passes the chain's own default rather than relying on
+    /// `Self::default()`, because the two chains do not share one: ETH defaults
+    /// to `fcr`, GC to `block-finality` (see `Config::from_env`).
+    fn parse(var: &str, value: &str, default: Self) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
             // An empty value is the same as not setting the var at all.
-            "" => Ok(Self::default()),
+            "" => Ok(default),
             "fcr" => Ok(BlockProcessingMode::Fcr),
             "block-finality" | "block_finality" => Ok(BlockProcessingMode::BlockFinality),
             other => Err(format!(
@@ -49,10 +52,10 @@ impl BlockProcessingMode {
         }
     }
 
-    fn from_env(var: &str) -> Result<Self, String> {
+    fn from_env(var: &str, default: Self) -> Result<Self, String> {
         match env::var(var) {
-            Ok(value) => Self::parse(var, &value),
-            Err(_) => Ok(Self::default()),
+            Ok(value) => Self::parse(var, &value, default),
+            Err(_) => Ok(default),
         }
     }
 }
@@ -335,8 +338,21 @@ impl Config {
                 "MAX_BLOCK_RANGE",
                 DEFAULT_MAX_BLOCK_RANGE,
             ),
-            eth_block_processing_mode: BlockProcessingMode::from_env("ETH_BLOCK_PROCESSING_MODE")?,
-            gc_block_processing_mode: BlockProcessingMode::from_env("GC_BLOCK_PROCESSING_MODE")?,
+            // ETH defaults to fcr: at ~12s versus ~12.8m, safe-block indexing is
+            // what makes ETH->GC relaying usable, and the reorg window it opens
+            // is closed after the fact by the fcr checker. The startup preflight
+            // downgrades it when no configured ETH_RPC can serve `safe`, so this
+            // default cannot silently fail open. GC stays conservative: that is
+            // the signature-collection direction, where this validator's
+            // signature is an irreversible commitment.
+            eth_block_processing_mode: BlockProcessingMode::from_env(
+                "ETH_BLOCK_PROCESSING_MODE",
+                BlockProcessingMode::Fcr,
+            )?,
+            gc_block_processing_mode: BlockProcessingMode::from_env(
+                "GC_BLOCK_PROCESSING_MODE",
+                BlockProcessingMode::BlockFinality,
+            )?,
         })
     }
 }

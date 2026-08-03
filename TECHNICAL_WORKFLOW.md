@@ -171,7 +171,7 @@ sequenceDiagram
     end
     M->>PG: connect pool (max 10, test_before_acquire)
     M->>PG: sqlx::migrate!("./migrations")
-    M->>PG: verify event_logs exists
+    Note over M,PG: a migration failure returns Err and aborts startup
     M->>M: spawn SIGINT/SIGTERM handler → watch::channel(bool)
     M->>M: build 4 indexers, 2 processors, 1 sender, 1 fcr checker
     M->>M: drop(tx) so the channel closes when processors stop
@@ -464,7 +464,7 @@ Every hand-off between units happens through this table. Schema after all four m
 | `transaction_hash` | `TEXT`      | indexer               | Source tx                                                                                                    |
 | `log_index`        | `BIGINT`    | indexer               | Unique within a block; part of the uniqueness constraint                                                     |
 | `is_processed`     | `TEXT`      | processor / sender    | `'false'` → claimable, `'true'` → claimed. Reset to `'false'` by a retry                                     |
-| `retry_count`      | `INT`       | sender                | Incremented on failure; the processor stops claiming at `>= 5`                                               |
+| `retry_count`      | `INT`       | sender                | Incremented on failure; the processor stops claiming at `>= MAX_RETRY_COUNT` (default 5)                     |
 | `stage`            | `TEXT`      | sender                | `'home'` (default) \| `'foreign'` — resume point for GC→ETH flows                                            |
 | `fcr_status`       | `TEXT`      | indexer / fcr checker | `NULL` (finality mode) \| `'pending'` \| `'confirmed'` \| `'reverted'`                                       |
 | `created_at`       | `TIMESTAMP` | DB                    |                                                                                                              |
@@ -491,7 +491,7 @@ stateDiagram-v2
     Foreign --> Deleted: foreign execution success<br/>or not enough signatures yet
     Claimed --> Stored: failure → retry_count+1, is_processed='false'
     Foreign --> Stored: failure → retry_count+1, is_processed='false'
-    Stored --> Abandoned: retry_count reaches 5<br/>(never claimed again, never deleted)
+    Stored --> Abandoned: retry_count reaches MAX_RETRY_COUNT<br/>(never claimed again, never deleted)
     Deleted --> [*]
 ```
 
@@ -682,10 +682,18 @@ on a chain share its mode — both bridges on a side move together. An unrecogni
 **startup error**, not a silent default: a typo must not hand back the conservative mode an
 operator believes they turned off.
 
-| Mode                       | Upper bound                | Source                                    | Latency   | Guarantee                                                                                |
-| -------------------------- | -------------------------- | ----------------------------------------- | --------- | ---------------------------------------------------------------------------------------- |
-| `block-finality` (default) | latest **finalized** block | Beacon API first, EL `finalized` fallback | ~12.8 min | Economic finality — a stored row can never leave the canonical chain                     |
-| `fcr`                      | latest **safe** block      | EL `eth_getBlockByNumber("safe")` only    | ~12 s     | Conditional (honest-majority, no slashing backing) — a safe block **can** be reorged out |
+| Mode                          | Upper bound                | Source                                    | Latency   | Guarantee                                                                                |
+| ----------------------------- | -------------------------- | ----------------------------------------- | --------- | ---------------------------------------------------------------------------------------- |
+| `block-finality` (GC default) | latest **finalized** block | Beacon API first, EL `finalized` fallback | ~12.8 min | Economic finality — a stored row can never leave the canonical chain                     |
+| `fcr` (ETH default)           | latest **safe** block      | EL `eth_getBlockByNumber("safe")` only    | ~12 s     | Conditional (honest-majority, no slashing backing) — a safe block **can** be reorged out |
+
+**The chains default differently.** ETH runs `fcr` because ETH→GC is the affirmation direction and
+~12.8m latency there is the bottleneck the whole feature exists to remove; the reorg window it
+opens is closed after the fact by [§5.4](#54-fcr-checker-servicefcr_checkerrs). GC stays on
+`block-finality` because GC→ETH is the signature-collection direction, where this validator's
+signature is an irreversible commitment. Both are per-chain overridable, and the boot preflight
+([§4](#4-startup-sequence)) downgrades ETH if no configured RPC can serve `safe` — so the fcr
+default cannot silently fail open.
 
 The mode changes exactly two things:
 
@@ -826,16 +834,21 @@ receipt.
 | `XDAI_VALIDATOR_PRIV_KEY`                                                                              | For xDai | —                 | Signing (`XDAI_GC`) and all xDai transactions                                                    |
 | `ETH_AMB_BRIDGE_ADDRESS`, `GC_AMB_BRIDGE_ADDRESS`, `ETH_XDAI_BRIDGE_ADDRESS`, `GC_XDAI_BRIDGE_ADDRESS` | No       | mainnet addresses | Indexer targets + bridge-mode derivation                                                         |
 | `AMB_BRIDGE_HELPER_ADDRESS`, `XDAI_BRIDGE_HELPER_ADDRESS`                                              | No       | mainnet addresses | Foreign-leg signature collection                                                                 |
-| `ETH_BLOCK_PROCESSING_MODE`, `GC_BLOCK_PROCESSING_MODE`                                                | No       | `block-finality`  | Indexer upper bound + `fcr_status`. Invalid value = startup failure                              |
+| `ETH_BLOCK_PROCESSING_MODE`                                                                            | No       | `fcr`             | ETH indexer upper bound + `fcr_status`. Invalid value = startup failure                          |
+| `GC_BLOCK_PROCESSING_MODE`                                                                             | No       | `block-finality`  | GC indexer upper bound + `fcr_status`. Invalid value = startup failure                           |
 | `POLL_INTERVAL_SECS`                                                                                   | No       | `10`              | Indexer cadence. `0` or unparseable → warns and uses 10                                          |
 | `FCR_CHECK_INTERVAL_SECS`                                                                              | No       | `30`              | FCR checker cadence. `0` or unparseable → warns and uses 30                                      |
 | `AMB_EXECUTE_MESSAGE_ON_FOREIGN`, `XDAI_EXECUTE_MESSAGE_ON_FOREIGN`                                    | No       | `"false"`         | Whether this validator pays gas for the final ETH execution. Compared as the **string** `"true"` |
 | `MAX_RETRY_COUNT`                                                                                      | No       | `5`               | Retry ceiling in the `read_from_db` claim query. `0` or unparseable → warns and uses 5           |
 | `MAX_BLOCK_RANGE`                                                                                      | No       | `2000`            | Max blocks per indexer `eth_getLogs`; wider ranges are chunked. `0` or unparseable → warns and uses 2000 |
+| `RUST_LOG`                                                                                             | No       | —                 | `EnvFilter` for `tracing_subscriber`                                                             |
 
 The four numeric knobs above share one parser (`Config::positive_u64_from_env`): unset, empty,
 unparseable and `0` all land on the documented default, and anything but "unset" logs a warning.
-| `RUST_LOG` | No | — | `EnvFilter` |
+
+The binary, `docker-compose.yml` and `.env.example` all carry the same defaults, deliberately —
+so `cargo run`, `docker compose up` and a copied `.env` start from the same baseline. When you
+change a default, change it in all three.
 
 ---
 

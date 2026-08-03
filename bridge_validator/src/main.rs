@@ -21,7 +21,7 @@ use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt, En
 #[tokio::main]
 async fn main() -> Result<(), BridgeValidatorError> {
     tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -55,11 +55,6 @@ async fn main() -> Result<(), BridgeValidatorError> {
             return Err(e.into());
         }
     }
-    let table_check = sqlx::query("SELECT to_regclass('public.event_logs')")
-        .fetch_one(&pool)
-        .await?;
-    tracing::info!("Verified event_logs table exists");
-
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // Shutdown signal: broadcast to all services on SIGTERM/SIGINT
