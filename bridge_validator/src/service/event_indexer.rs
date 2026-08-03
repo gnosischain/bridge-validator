@@ -208,7 +208,6 @@ impl<P: Provider> EventIndexer<P> {
             chunk_start = chunk_end + 1;
         }
 
-        // Advance the cursor to the block we just indexed up to.
         Ok(indexed_through)
     }
 
@@ -269,11 +268,9 @@ impl<P: Provider> EventIndexer<P> {
                 }
             };
 
-            // Extract the event signature (topics[0])
             if let Some(topic_key) = log.topics().get(0) {
                 let topic_key_str = format!("{:?}", topic_key);
 
-                // Serialize the entire log object to JSON
                 let log_json = serde_json::to_value(&log)?;
 
                 let bridge_mode = Self::check_bridge_mode(self.contract_address, &self.config);
@@ -287,7 +284,6 @@ impl<P: Provider> EventIndexer<P> {
                     BlockProcessingMode::BlockFinality => None,
                 };
 
-                // Insert into database
                 match sqlx::query(
                     r#"
                     INSERT INTO event_logs (topic_key, bridge_mode, log_data, block_number, block_hash, transaction_hash, log_index, is_processed, fcr_status)
@@ -316,9 +312,6 @@ impl<P: Provider> EventIndexer<P> {
                     self.eventName
                 );
             }
-
-            // Example Log output
-            // Log found: Log { inner: Log { address: 0x4c36d2919e407f0cc2ee3c993ccf8ac26d9ce64e, data: LogData { topics: [0x482515ce3d9494a37ce83f18b72b363449458435fafdd7a53ddea7460fe01b58, 0x000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e6], data: 0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000b5000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e688ad09518695c6c3712ac10a214be5109a655671f6a78083ca3e2a662d6dd1703c939c8ace2e268d001e84800101000164125e4cfb0000000000000000000000006810e776880c02933d47db1b9fc05908e5386b9600000000000000000000000036c2879f055519593c28b56317950239c6ecd58b0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000 } }, block_hash: Some(0x223181b0230ef914af338eb648ed05c46743c985e9651b3fb2341c587e0b5f46), block_number: Some(24226354), block_timestamp: None, transaction_hash: Some(0x3108ac7fc0101b236fd43dbacac908e87f85035a65338ce9e6851773f9574706), transaction_index: Some(0), log_index: Some(1), removed: false }
         }
 
         Ok(())
@@ -368,8 +361,7 @@ impl<P: Provider> EventIndexer<P> {
     }
 }
 
-// Helper function to determine bridge mode from contract address
-// This is outside the Provider-bound impl so it can be tested without a provider
+// Outside the Provider-bound impl so these can be tested without a provider.
 impl<P> EventIndexer<P> {
     /// Which chain this indexer watches (`"eth"` / `"gc"`), derived from the
     /// contract's bridge mode. Both bridges on a side share the chain's

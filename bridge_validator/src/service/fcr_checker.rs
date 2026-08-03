@@ -27,13 +27,6 @@ use tokio::time::{sleep, Duration};
 /// piling up.
 const PENDING_BACKLOG_WARN_THRESHOLD: i64 = 100;
 
-// How often a revalidation cycle runs is `Config::fcr_check_interval_secs`
-// (`FCR_CHECK_INTERVAL_SECS`, default 30s). Finality advances about every 6.4
-// minutes, so polling much faster than that only burns RPC calls on blocks that
-// cannot possibly have finalized yet — but the cadence is configurable because
-// test harnesses drive finality on demand and would otherwise spend most of
-// their wall-clock waiting out a production interval.
-
 /// One safe-processed block awaiting revalidation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingBlock {

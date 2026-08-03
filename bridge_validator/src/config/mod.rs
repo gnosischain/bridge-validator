@@ -258,7 +258,6 @@ impl Config {
             .map(Self::parse_rpc_urls)
             .unwrap_or_default();
 
-        // Validate that at least one RPC URL is provided for each
         if eth_rpc.is_empty() {
             return Err("ETH_RPC must contain at least one valid URL".to_string());
         }

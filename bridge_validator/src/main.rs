@@ -20,7 +20,6 @@ use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt, En
 
 #[tokio::main]
 async fn main() -> Result<(), BridgeValidatorError> {
-    // Initialize tracing
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
         .with(tracing_subscriber::fmt::layer())
@@ -37,7 +36,6 @@ async fn main() -> Result<(), BridgeValidatorError> {
     crate::service::safe::run_fcr_preflight(&mut config, &reqwest::Client::new()).await;
     let config = config;
 
-    // Initialize database connection pool
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file");
 
@@ -49,7 +47,6 @@ async fn main() -> Result<(), BridgeValidatorError> {
 
     tracing::info!("Database connection established");
 
-    // Run migrations automatically
     tracing::info!("Running database migrations...");
     match sqlx::migrate!("./migrations").run(&pool).await {
         Ok(_) => tracing::info!("Migrations completed successfully"),
@@ -58,13 +55,11 @@ async fn main() -> Result<(), BridgeValidatorError> {
             return Err(e.into());
         }
     }
-    // Verify the table exists
     let table_check = sqlx::query("SELECT to_regclass('public.event_logs')")
         .fetch_one(&pool)
         .await?;
     tracing::info!("Verified event_logs table exists");
 
-    // Add a small delay to ensure everything is ready
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // Shutdown signal: broadcast to all services on SIGTERM/SIGINT
@@ -95,7 +90,6 @@ async fn main() -> Result<(), BridgeValidatorError> {
         let _ = shutdown_tx.send(true);
     });
 
-    // Initiating services
     let indexer_eth_amb = EventIndexer::new(
         config.clone(),
         setup_provider(&config, "eth").await?,

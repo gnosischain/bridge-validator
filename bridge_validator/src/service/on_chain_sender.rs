@@ -92,7 +92,6 @@ impl OnChainSender {
                 tracing::debug!("Message length: {} bytes", calldata.message.len());
                 tracing::debug!("Message hex: 0x{}", hex::encode(&calldata.message));
 
-                // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
                     .amb_validator_private_key
@@ -132,7 +131,6 @@ impl OnChainSender {
                         "AMB_ETH: affirmation already signed by validator {}, skipping",
                         sender_addr
                     );
-                    // Delete the event log since this validator already signed
                     self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
@@ -158,7 +156,6 @@ impl OnChainSender {
                     return Ok(());
                 }
 
-                // Execute the affirmation transaction
                 match bridge_instance
                     .executeAffirmation(calldata.message)
                     .send()
@@ -203,7 +200,6 @@ impl OnChainSender {
                 tracing::debug!("Signature length: {} bytes", calldata.signature.len());
                 tracing::debug!("Signature hex: 0x{}", hex::encode(&calldata.signature));
 
-                // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
                     .amb_validator_private_key
@@ -271,7 +267,6 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Submit the signature transaction
                     let submit_result = async {
                         let submit_signature_tx = bridge_instance
                             .submitSignature(calldata.signature, calldata.message.clone())
@@ -299,7 +294,6 @@ impl OnChainSender {
                     }
                     .await;
 
-                    // If submit failed, increment retry count and return
                     if submit_result.is_err() {
                         self.increment_retry_count(event_log_id).await?;
                         return Ok(());
@@ -311,7 +305,6 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Mark stage as 'foreign' before attempting foreign execution
                     self.update_stage(event_log_id, "foreign").await?;
                 }
 
@@ -417,7 +410,6 @@ impl OnChainSender {
                 tracing::debug!("Value: {:?}", calldata.value);
                 tracing::debug!("Nonce: 0x{}", hex::encode(calldata.nonce));
 
-                // Parse the private key string into a PrivateKeySigner
                 let pk_signer: PrivateKeySigner = self
                     .config
                     .xdai_validator_private_key
@@ -451,7 +443,7 @@ impl OnChainSender {
                 buf2.extend_from_slice(hash_msg.as_slice());
                 let hash_sender = keccak256(&buf2);
 
-                // Check 2:   require(!bridge_instance.affirmationsSigned(hashSender));
+                // Check 1: require(!bridge_instance.affirmationsSigned(hashSender));
                 let already_affirmed = bridge_instance
                     .affirmationsSigned(hash_sender)
                     .call()
@@ -462,12 +454,11 @@ impl OnChainSender {
                         "XDAI_ETH: affirmation already signed by validator {}, skipping",
                         sender_addr
                     );
-                    // Delete the event log since this validator already signed
                     self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                // signed = bridge_instance.numAffirmationsSigned(hashMsg);
+                // Check 2: signed = bridge_instance.numAffirmationsSigned(hashMsg);
                 let signed: U256 = bridge_instance
                     .numAffirmationsSigned(hash_msg)
                     .call()
@@ -484,12 +475,10 @@ impl OnChainSender {
                     tracing::info!(
                         "XDAI_ETH: message already has {signed} >= required {required} affirmations, skipping"
                     );
-                    // Delete the event log since it's already processed
                     self.delete_event_log(event_log_id).await?;
                     return Ok(());
                 }
 
-                // Execute the affirmation transaction
                 match bridge_instance
                     .executeAffirmation(calldata.recipient, calldata.value, calldata.nonce)
                     .send()
@@ -602,7 +591,6 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Submit the signature transaction
                     let submit_result = async {
                         let submit_signature_tx = bridge_instance
                             .submitSignature(calldata.signature, calldata.message.clone())
@@ -630,7 +618,6 @@ impl OnChainSender {
                     }
                     .await;
 
-                    // If submit failed, increment retry count and return
                     if submit_result.is_err() {
                         self.increment_retry_count(event_log_id).await?;
                         return Ok(());
@@ -642,7 +629,6 @@ impl OnChainSender {
                         return Ok(());
                     }
 
-                    // Mark stage as 'foreign' before attempting foreign execution
                     self.update_stage(event_log_id, "foreign").await?;
                 }
 
@@ -673,7 +659,6 @@ impl OnChainSender {
                         .map_err(|e| BridgeValidatorError::ContractCall(e.to_string()))?;
 
                     if signatures.len() == (2 + 65 * required.to::<usize>() - 1) {
-                        // Create provider for Ethereum (foreign chain)
                         let eth_provider = ProviderBuilder::new()
                             .wallet(pk_signer.clone())
                             .connect(self.config.get_eth_rpc())

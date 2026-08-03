@@ -70,7 +70,6 @@ impl MessageProcessor {
 
             match self.read_from_db().await {
                 Ok(Some(event_log)) => {
-                    // Received event log data that needs to be processed
                     tracing::debug!(
                         "Processing event log ID: {}, Topic: {}, Bridge Mode: {}, Origin Tx: {:?}",
                         event_log.id,
@@ -85,7 +84,6 @@ impl MessageProcessor {
                         event_log.transaction_hash,
                     );
 
-                    // Call process_message_or_skip and pass the event log data as function argument
                     if let Err(e) = self.process_message_or_skip(&event_log).await {
                         tracing::error!("Error in process_message_or_skip: {}", e);
                     }
@@ -118,7 +116,6 @@ impl MessageProcessor {
         &self,
         event_log: &EventLogRow,
     ) -> Result<(), BridgeValidatorError> {
-        // Deserialize the log_data JSON back into a Log object
         let log: Log = serde_json::from_value(event_log.log_data.clone())?;
 
         match event_log.bridge_mode.as_str() {
@@ -145,7 +142,6 @@ impl MessageProcessor {
             "AMB_GC" => {
                 let decoded = AMB_BRIDGE::UserRequestForSignature::decode_log(&log)?;
 
-                // sign
                 let priv_key_str = self
                     .config
                     .amb_validator_private_key
@@ -183,7 +179,6 @@ impl MessageProcessor {
             "XDAI_ETH" => {
                 let decoded = XDAI_BRIDGE::UserRequestForAffirmation::decode_log(&log)?;
 
-                // Call safeExecuteSignaturesWithAutoGasLimit
                 self.tokio_sender
                     .send(SenderData {
                         on_chain_calldata: OnChainCallData::XdaiEth {
@@ -213,7 +208,6 @@ impl MessageProcessor {
                     decoded.token.clone(),
                 )?;
 
-                // Sign the xdai_message
                 let priv_key_str = self
                     .config
                     .xdai_validator_private_key
@@ -235,7 +229,6 @@ impl MessageProcessor {
                     .map_err(|e| BridgeValidatorError::Sign(e.to_string()))?;
                 tracing::debug!("Signature: 0x{}", hex::encode(&signature.as_bytes()));
 
-                // Decode the hex string to actual bytes before sending
                 self.tokio_sender
                     .send(SenderData {
                         on_chain_calldata: OnChainCallData::XdaiGc {
@@ -345,10 +338,10 @@ impl MessageProcessor {
         // which is what clamping to i32::MAX yields in practice.
         let max_retry_count = i32::try_from(self.config.max_retry_count).unwrap_or(i32::MAX);
 
-        // FOR UPDATE SKIP LOCKED
-        // 1. FOR UPDATE - Locks the selected row(s) within the transaction, preventing other transactions from reading or modifying them
-        // 2. SKIP LOCKED - If a row is already locked by another transaction, skip it and move to the next available row
-        // Query for the first unprocessed log with the smallest block_number
+        // FOR UPDATE SKIP LOCKED is what lets both MessageProcessor instances
+        // share this queue: FOR UPDATE row-locks the claimed row until the
+        // transaction commits, and SKIP LOCKED makes the other processor step
+        // over it and take the next row instead of blocking on the lock.
         let row = sqlx::query_as!(
             EventLogRow,
             r#"
@@ -365,7 +358,6 @@ impl MessageProcessor {
         .await?;
 
         if let Some(ref log_row) = row {
-            // Mark this row as processed
             sqlx::query(
                 r#"
                 UPDATE event_logs
@@ -381,7 +373,6 @@ impl MessageProcessor {
             tracing::debug!("Marked log {} as processed", log_row.id);
         }
 
-        // Commit the transaction
         tx.commit().await?;
 
         Ok(row)
