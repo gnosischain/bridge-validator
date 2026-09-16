@@ -75,7 +75,10 @@ async fn init_test_database() -> Arc<TestDatabase> {
         .get_or_init(|| async {
             // Check if DATABASE_URL is set (for CI/CD)
             if let Ok(database_url) = std::env::var("DATABASE_URL") {
-                eprintln!("Using external database from DATABASE_URL: {}", database_url);
+                eprintln!(
+                    "Using external database from DATABASE_URL: {}",
+                    database_url
+                );
 
                 // No container needed for external database
                 return Arc::new(TestDatabase {
@@ -123,10 +126,7 @@ async fn init_test_database() -> Arc<TestDatabase> {
                         break;
                     }
                     Err(e) if retries > 0 => {
-                        eprintln!(
-                            "Failed to connect, retrying... ({} attempts left)",
-                            retries
-                        );
+                        eprintln!("Failed to connect, retrying... ({} attempts left)", retries);
                         eprintln!("Error: {}", e);
                         retries -= 1;
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -214,6 +214,10 @@ pub async fn setup_test_db() -> (PgPool, MutexGuard<'static, ()>) {
         .execute(&pool)
         .await
         .expect("Failed to clean event_logs table");
+    sqlx::query("DELETE FROM fcr_false_positives")
+        .execute(&pool)
+        .await
+        .expect("Failed to clean fcr_false_positives table");
 
     (pool, guard)
 }
@@ -296,7 +300,11 @@ pub fn create_test_config() -> worker::config::Config {
         xdai_bridge_helper_address: address!("e30269bc61E677cD60aD163a221e464B7022fbf5"),
         amb_bridge_helper_address: address!("7d94ece17e81355326e3359115D4B02411825EdD"),
         poll_interval_secs: 1,
+        fcr_check_interval_secs: 1,
         max_retry_count: 5,
+        max_block_range: 2000,
+        eth_block_processing_mode: worker::config::BlockProcessingMode::BlockFinality,
+        gc_block_processing_mode: worker::config::BlockProcessingMode::BlockFinality,
     }
 }
 

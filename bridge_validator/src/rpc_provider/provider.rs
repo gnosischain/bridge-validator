@@ -15,7 +15,6 @@ pub async fn setup_provider(
     config: &Config,
     chain: &str,
 ) -> Result<impl Provider, BridgeValidatorError> {
-    // Select which RPC array to use based on chain
     let rpc_urls = match chain {
         "eth" => &config.eth_rpc,
         "gc" => &config.gc_rpc,
@@ -36,7 +35,6 @@ pub async fn setup_provider(
         transports.push(Http::new(parsed_url));
     }
 
-    // Configure the fallback layer with active transport count (max 3 or less if fewer RPCs)
     // Refer to https://alloy.rs/examples/layers/fallback_layer
     let active_count = transports.len().min(3);
     let fallback_layer = FallbackLayer::default()
@@ -48,7 +46,6 @@ pub async fn setup_provider(
 
     let client = RpcClient::builder().transport(transport, false);
 
-    // Create provider with the client
     let provider = ProviderBuilder::new().connect_client(client);
 
     Ok(provider)

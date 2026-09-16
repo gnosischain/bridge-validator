@@ -51,11 +51,19 @@ services:
       ETH_XDAI_BRIDGE_ADDRESS: ${ETH_XDAI_BRIDGE_ADDRESS:-0x4aa42145Aa6Ebf72e164C9bBC74fbD3788045016}
       GC_XDAI_BRIDGE_ADDRESS: ${GC_XDAI_BRIDGE_ADDRESS:-0x7301CFA0e1756B71869E93d4e4Dca5c7d0eb0AA6}
 
+      # Block processing mode per chain: fcr | block-finality
+      ETH_BLOCK_PROCESSING_MODE: ${ETH_BLOCK_PROCESSING_MODE:-fcr}
+      GC_BLOCK_PROCESSING_MODE: ${GC_BLOCK_PROCESSING_MODE:-block-finality}
+
       # Poll interval in seconds
       POLL_INTERVAL_SECS: ${POLL_INTERVAL_SECS:-10}
+      # fcr revalidation cadence in seconds (fcr mode only)
+      FCR_CHECK_INTERVAL_SECS: ${FCR_CHECK_INTERVAL_SECS:-30}
       MAX_RETRY_COUNT: ${MAX_RETRY_COUNT:-5}
-      XDAI_EXECUTE_MESSAGE_ON_FOREIGN: ${XDAI_EXECUTE_MESSAGE_ON_FOREIGN:-true} # true if execute message from GC -> ETH
-      AMB_EXECUTE_MESSAGE_ON_FOREIGN: ${AMB_EXECUTE_MESSAGE_ON_FOREIGN:-true}
+      # Max block span per eth_getLogs call; wider ranges are chunked
+      MAX_BLOCK_RANGE: ${MAX_BLOCK_RANGE:-2000}
+      XDAI_EXECUTE_MESSAGE_ON_FOREIGN: ${XDAI_EXECUTE_MESSAGE_ON_FOREIGN:-false} # true if execute message from GC -> ETH
+      AMB_EXECUTE_MESSAGE_ON_FOREIGN: ${AMB_EXECUTE_MESSAGE_ON_FOREIGN:-false}
 
       # Logging
       RUST_LOG: ${RUST_LOG:-info}

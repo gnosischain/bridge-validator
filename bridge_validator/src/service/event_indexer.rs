@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{BlockProcessingMode, Config};
 use crate::contracts::{AMB_BRIDGE, XDAI_BRIDGE};
 use crate::error::BridgeValidatorError;
 use alloy::{
@@ -56,23 +56,20 @@ impl<P: Provider> EventIndexer<P> {
         );
         let mut last_processed_block = 0;
         loop {
-            // Resolve the latest finalized block through the shared (beacon-first)
-            // finality source and only index up to there. Finalized blocks can't
-            // be reorged out, so a log we store is guaranteed to remain part of
-            // the canonical chain — closing the reorg gap that a "latest block"
-            // indexer would otherwise leave for the message processor.
-            let (bc_rpc, el_rpcs) = self.finality_rpcs();
-            match crate::service::finality::get_finalized_block_number(
-                &self.http_client,
-                bc_rpc,
-                el_rpcs,
-            )
-            .await
-            {
-                Ok(finalized_block) => {
-                    // finalized block numbers are non-negative; clamp defensively.
-                    let finalized_block = finalized_block.max(0) as u64;
-                    match self.poll_events(last_processed_block, finalized_block).await {
+            // Resolve this cycle's upper bound. In block-finality mode that is
+            // the latest finalized block, which can't be reorged out, so a log
+            // we store is guaranteed to remain part of the canonical chain. In
+            // fcr mode it is the (much fresher) `safe` block, which can be
+            // reorged out — `service::fcr_checker` re-checks those rows once
+            // they finalize.
+            match self.resolve_upper_bound().await {
+                Ok(upper_bound_block) => {
+                    // block numbers are non-negative; clamp defensively.
+                    let upper_bound_block = upper_bound_block.max(0) as u64;
+                    match self
+                        .poll_events(last_processed_block, upper_bound_block)
+                        .await
+                    {
                         Ok(new_block) => {
                             last_processed_block = new_block;
                         }
@@ -88,7 +85,7 @@ impl<P: Provider> EventIndexer<P> {
                 }
                 Err(e) => {
                     tracing::error!(
-                        "[{}-{}] Could not resolve finalized block, skipping this round: {}",
+                        "[{}-{}] Could not resolve the upper bound block, skipping this round: {}",
                         self.provider_name,
                         self.eventName,
                         e
@@ -109,17 +106,27 @@ impl<P: Provider> EventIndexer<P> {
         }
     }
 
-    /// Index logs in the range `(last_processed_block, finalized_block]`.
+    /// Index logs in the range `(last_processed_block, upper_bound_block]`.
     ///
-    /// `finalized_block` is the upper bound resolved by the caller through the
-    /// shared finality source. Only finalized blocks are indexed, and the loop
-    /// cursor advances to `finalized_block` (never to the chain tip), so blocks
-    /// between finality and the tip are revisited on a later round once they
-    /// finalize rather than being skipped.
+    /// `upper_bound_block` is resolved by the caller from the chain's mode:
+    /// the latest finalized block in block-finality mode, the latest `safe`
+    /// block in fcr mode. The cursor advances to that bound (never to the chain
+    /// tip), so blocks between it and the tip are revisited on a later round
+    /// rather than being skipped.
+    ///
+    /// The range is split into consecutive chunks of at most
+    /// `config.max_block_range` blocks, one `eth_getLogs` per chunk. A single
+    /// call spanning an arbitrarily wide range is what providers reject once
+    /// the validator falls far enough behind, and because a failed cycle does
+    /// not advance the cursor while the upper bound keeps rising, an unchunked
+    /// query only ever gets wider — the stall is permanent. Chunking also makes
+    /// catch-up incremental: the cursor is returned as of the last chunk that
+    /// actually succeeded, so a failure partway through keeps everything
+    /// indexed before it instead of replaying the whole range next cycle.
     pub async fn poll_events(
         &self,
         last_processed_block: u64,
-        finalized_block: u64,
+        upper_bound_block: u64,
     ) -> Result<u64, BridgeValidatorError> {
         tracing::debug!(
             "[{}-{}] Polling events...",
@@ -127,30 +134,104 @@ impl<P: Provider> EventIndexer<P> {
             self.eventName
         );
         tracing::debug!(
-            "[{}-{}] Finalized block: {}",
+            "[{}-{}] Upper bound block ({} mode): {}",
             self.provider_name,
             self.eventName,
-            finalized_block
+            self.mode(),
+            upper_bound_block
         );
-        if finalized_block <= last_processed_block {
+        if upper_bound_block <= last_processed_block {
             tracing::debug!(
-                "[{}-{}] No newly finalized blocks to process",
+                "[{}-{}] No new blocks to process",
                 self.provider_name,
                 self.eventName
             );
             return Ok(last_processed_block);
         }
         let start_block = if last_processed_block == 0 {
-            finalized_block // TODO: Or config.start_block
+            upper_bound_block // TODO: Or config.start_block
         } else {
             last_processed_block + 1
         };
 
+        // `positive_u64_from_env` rejects zero, so this is always >= 1 and the
+        // cursor below always advances.
+        let max_block_range = self.config.max_block_range;
+        let total_blocks = upper_bound_block - start_block + 1;
+        if total_blocks > max_block_range {
+            tracing::info!(
+                "[{}-{}] Catching up on {} blocks ({}..={}) in chunks of {}",
+                self.provider_name,
+                self.eventName,
+                total_blocks,
+                start_block,
+                upper_bound_block,
+                max_block_range
+            );
+        }
+
+        // Last block confirmed indexed. Stays below `start_block` until the
+        // first chunk lands, which is how a total failure is told apart from a
+        // partial one.
+        let mut indexed_through = start_block.saturating_sub(1);
+        let mut chunk_start = start_block;
+
+        while chunk_start <= upper_bound_block {
+            let chunk_end = chunk_start
+                .saturating_add(max_block_range - 1)
+                .min(upper_bound_block);
+
+            if let Err(e) = self.index_block_range(chunk_start, chunk_end).await {
+                if indexed_through >= start_block {
+                    // Earlier chunks landed. Keep them: the caller advances its
+                    // cursor to `indexed_through`, so the next cycle resumes at
+                    // the chunk that failed rather than re-querying from the
+                    // start of the range.
+                    tracing::error!(
+                        "[{}-{}] Failed to index blocks {}..={} ({}); keeping progress through block {}",
+                        self.provider_name,
+                        self.eventName,
+                        chunk_start,
+                        chunk_end,
+                        e,
+                        indexed_through
+                    );
+                    return Ok(indexed_through);
+                }
+                return Err(e);
+            }
+
+            indexed_through = chunk_end;
+            if chunk_end == u64::MAX {
+                break;
+            }
+            chunk_start = chunk_end + 1;
+        }
+
+        Ok(indexed_through)
+    }
+
+    /// Fetch and persist every matching log in the inclusive range
+    /// `[from_block, to_block]`. One `eth_getLogs` call; the caller is
+    /// responsible for keeping the span within `config.max_block_range`.
+    async fn index_block_range(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<(), BridgeValidatorError> {
+        tracing::debug!(
+            "[{}-{}] Fetching logs for blocks {}..={}",
+            self.provider_name,
+            self.eventName,
+            from_block,
+            to_block
+        );
+
         let filter = Filter::new()
             .address(self.contract_address)
             .event(&self.eventName)
-            .from_block(start_block)
-            .to_block(finalized_block);
+            .from_block(from_block)
+            .to_block(to_block);
 
         let logs = self
             .provider
@@ -187,20 +268,26 @@ impl<P: Provider> EventIndexer<P> {
                 }
             };
 
-            // Extract the event signature (topics[0])
             if let Some(topic_key) = log.topics().get(0) {
                 let topic_key_str = format!("{:?}", topic_key);
 
-                // Serialize the entire log object to JSON
                 let log_json = serde_json::to_value(&log)?;
 
                 let bridge_mode = Self::check_bridge_mode(self.contract_address, &self.config);
 
-                // Insert into database
+                // In fcr mode the row is indexed from a `safe` block that can
+                // still be reorged out, so it enters the revalidation
+                // lifecycle. block-finality rows leave fcr_status NULL —
+                // they're final by construction and there is nothing to check.
+                let fcr_status = match self.mode() {
+                    BlockProcessingMode::Fcr => Some("pending"),
+                    BlockProcessingMode::BlockFinality => None,
+                };
+
                 match sqlx::query(
                     r#"
-                    INSERT INTO event_logs (topic_key, bridge_mode, log_data, block_number, transaction_hash, log_index, is_processed)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    INSERT INTO event_logs (topic_key, bridge_mode, log_data, block_number, block_hash, transaction_hash, log_index, is_processed, fcr_status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (transaction_hash, log_index) DO NOTHING
                     "#
                 )
@@ -208,9 +295,11 @@ impl<P: Provider> EventIndexer<P> {
                 .bind(&bridge_mode)
                 .bind(&log_json)
                 .bind(log.block_number.map(|n| n as i64))
+                .bind(log.block_hash.map(|h| format!("{:?}", h)))
                 .bind(log.transaction_hash.map(|h| format!("{:?}", h)))
                 .bind(log_index)
                 .bind("false")
+                .bind(fcr_status)
                 .execute(&self.db_pool)
                 .await {
                     Ok(_) => tracing::debug!("[{}-{}] Stored log with topic key: {} ", self.provider_name, self.eventName, topic_key_str),
@@ -223,29 +312,72 @@ impl<P: Provider> EventIndexer<P> {
                     self.eventName
                 );
             }
-
-            // Example Log output
-            // Log found: Log { inner: Log { address: 0x4c36d2919e407f0cc2ee3c993ccf8ac26d9ce64e, data: LogData { topics: [0x482515ce3d9494a37ce83f18b72b363449458435fafdd7a53ddea7460fe01b58, 0x000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e6], data: 0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000b5000500004ac82b41bd819dd871590b510316f2385cb196fb000000000002d8e688ad09518695c6c3712ac10a214be5109a655671f6a78083ca3e2a662d6dd1703c939c8ace2e268d001e84800101000164125e4cfb0000000000000000000000006810e776880c02933d47db1b9fc05908e5386b9600000000000000000000000036c2879f055519593c28b56317950239c6ecd58b0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000 } }, block_hash: Some(0x223181b0230ef914af338eb648ed05c46743c985e9651b3fb2341c587e0b5f46), block_number: Some(24226354), block_timestamp: None, transaction_hash: Some(0x3108ac7fc0101b236fd43dbacac908e87f85035a65338ce9e6851773f9574706), transaction_index: Some(0), log_index: Some(1), removed: false }
         }
 
-        // Advance the cursor to the finalized block we just indexed up to.
-        Ok(finalized_block)
+        Ok(())
     }
 
     /// Pick the finality source (beacon RPC + EL RPC fallbacks) for the chain
     /// this indexer watches, derived from the contract's bridge mode. ETH-side
     /// bridges finalize against the Ethereum endpoints; GC-side against Gnosis.
     fn finality_rpcs(&self) -> (Option<&str>, &[String]) {
-        match Self::check_bridge_mode(self.contract_address, &self.config).as_str() {
-            "AMB_ETH" | "XDAI_ETH" => (self.config.get_eth_bc_rpc(), &self.config.eth_rpc),
-            _ => (self.config.get_gc_bc_rpc(), &self.config.gc_rpc),
+        self.config.finality_rpcs_for_chain(self.chain())
+    }
+
+    /// Resolve the highest block this cycle may index up to, per the chain's
+    /// configured mode.
+    ///
+    /// In fcr mode a missing `safe` block is **not** fatal: it falls back to
+    /// `finalized` (the fresh-start guard) so the indexer keeps making progress
+    /// conservatively. That fallback is logged loudly — a chain configured for
+    /// fcr that silently runs on finality would give operators ~12.8m latency
+    /// while they believe they have ~12s.
+    pub async fn resolve_upper_bound(&self) -> Result<i64, BridgeValidatorError> {
+        let (bc_rpc, el_rpcs) = self.finality_rpcs();
+
+        if self.mode().is_fcr() {
+            match crate::service::safe::get_safe_block_number(&self.http_client, el_rpcs).await {
+                Ok(Some(safe_block)) => return Ok(safe_block),
+                Ok(None) => tracing::warn!(
+                    "[{}-{}] Chain '{}' is in fcr mode but no safe block is available yet; \
+                     falling back to the finalized block this cycle",
+                    self.provider_name,
+                    self.eventName,
+                    self.chain()
+                ),
+                Err(e) => tracing::error!(
+                    "[{}-{}] Chain '{}' is in fcr mode but the safe block could not be resolved ({}); \
+                     falling back to the finalized block this cycle",
+                    self.provider_name,
+                    self.eventName,
+                    self.chain(),
+                    e
+                ),
+            }
         }
+
+        crate::service::finality::get_finalized_block_number(&self.http_client, bc_rpc, el_rpcs)
+            .await
     }
 }
 
-// Helper function to determine bridge mode from contract address
-// This is outside the Provider-bound impl so it can be tested without a provider
+// Outside the Provider-bound impl so these can be tested without a provider.
 impl<P> EventIndexer<P> {
+    /// Which chain this indexer watches (`"eth"` / `"gc"`), derived from the
+    /// contract's bridge mode. Both bridges on a side share the chain's
+    /// block processing mode.
+    pub fn chain(&self) -> &'static str {
+        match Self::check_bridge_mode(self.contract_address, &self.config).as_str() {
+            "AMB_ETH" | "XDAI_ETH" => "eth",
+            _ => "gc",
+        }
+    }
+
+    /// The configured block processing mode for this indexer's chain.
+    pub fn mode(&self) -> BlockProcessingMode {
+        self.config.mode_for_chain(self.chain())
+    }
+
     pub fn check_bridge_mode(contract_address: Address, config: &Config) -> String {
         if contract_address == config.eth_amb_bridge_address {
             "AMB_ETH".to_string()

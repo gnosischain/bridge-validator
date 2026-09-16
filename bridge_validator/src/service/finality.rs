@@ -108,7 +108,6 @@ pub async fn get_finalized_block_number(
     bc_rpc: Option<&str>,
     el_rpcs: &[String],
 ) -> Result<i64, BridgeValidatorError> {
-    // Try beacon chain RPC first, if configured
     if let Some(bc_rpc) = bc_rpc {
         match get_finalized_block_from_beacon(http_client, bc_rpc).await {
             Ok(block_number) => return Ok(block_number),
@@ -118,7 +117,6 @@ pub async fn get_finalized_block_number(
         }
     }
 
-    // Fallback: try EL RPCs with eth_getBlockByNumber
     for (i, el_rpc) in el_rpcs.iter().enumerate() {
         tracing::info!("Trying EL RPC {}/{}: {}", i + 1, el_rpcs.len(), el_rpc);
         match get_finalized_block_from_el(http_client, el_rpc).await {

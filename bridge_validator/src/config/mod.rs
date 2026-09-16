@@ -6,6 +6,66 @@ use alloy_primitives::Log;
 
 use std::env;
 
+/// Which block a chain's indexers treat as the safe upper bound to index up to.
+///
+/// `BlockFinality` is the historical (and default) behaviour: only finalized
+/// blocks are indexed, so a stored log can never be reorged out. `Fcr` caps at
+/// the execution layer's `safe` tag instead — roughly an order of magnitude
+/// faster (~12s vs ~12.8m) at the cost of a reorg window that
+/// `service::fcr_checker` closes after the fact.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlockProcessingMode {
+    Fcr,
+    #[default]
+    BlockFinality,
+}
+
+impl BlockProcessingMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BlockProcessingMode::Fcr => "fcr",
+            BlockProcessingMode::BlockFinality => "block-finality",
+        }
+    }
+
+    pub fn is_fcr(&self) -> bool {
+        matches!(self, BlockProcessingMode::Fcr)
+    }
+
+    /// Parse a mode from its env-var spelling. Unknown values are rejected
+    /// rather than silently defaulted: a typo'd `ETH_BLOCK_PROCESSING_MODE`
+    /// must not quietly hand back a mode an operator believes they turned off.
+    ///
+    /// The caller passes the chain's own default rather than relying on
+    /// `Self::default()`, because the two chains do not share one: ETH defaults
+    /// to `fcr`, GC to `block-finality` (see `Config::from_env`).
+    fn parse(var: &str, value: &str, default: Self) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            // An empty value is the same as not setting the var at all.
+            "" => Ok(default),
+            "fcr" => Ok(BlockProcessingMode::Fcr),
+            "block-finality" | "block_finality" => Ok(BlockProcessingMode::BlockFinality),
+            other => Err(format!(
+                "Invalid {}: '{}' (expected 'fcr' or 'block-finality')",
+                var, other
+            )),
+        }
+    }
+
+    fn from_env(var: &str, default: Self) -> Result<Self, String> {
+        match env::var(var) {
+            Ok(value) => Self::parse(var, &value, default),
+            Err(_) => Ok(default),
+        }
+    }
+}
+
+impl std::fmt::Display for BlockProcessingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub eth_rpc: Vec<String>,
@@ -23,8 +83,46 @@ pub struct Config {
     pub xdai_bridge_helper_address: Address,
     pub amb_bridge_helper_address: Address,
     pub poll_interval_secs: u64,
+    /// How often `service::fcr_checker` re-checks safe-processed blocks that
+    /// have since finalized. Separate from `poll_interval_secs`, which drives
+    /// the indexers: revalidation is gated on finality (~6.4 min), so it is
+    /// deliberately much slower than indexing. Configurable because test
+    /// harnesses drive finality on demand and cannot wait out a production
+    /// cadence.
+    pub fcr_check_interval_secs: u64,
     pub max_retry_count: u64,
+    /// Largest span of blocks, inclusive, that a single `eth_getLogs` call may
+    /// cover. `service::event_indexer` splits a wider catch-up range into
+    /// consecutive chunks of at most this size.
+    pub max_block_range: u64,
+    pub eth_block_processing_mode: BlockProcessingMode,
+    pub gc_block_processing_mode: BlockProcessingMode,
 }
+
+/// Default revalidation cadence, in seconds. Finality advances roughly every
+/// 6.4 minutes, so this only needs to be fast enough that a finalized block is
+/// re-checked promptly — polling faster mostly burns RPC calls on blocks that
+/// cannot have finalized yet.
+pub const DEFAULT_FCR_CHECK_INTERVAL_SECS: u64 = 30;
+
+/// Default indexer polling cadence, in seconds.
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 10;
+
+/// Default retry ceiling. A row whose `retry_count` reaches this is no longer
+/// claimed by [`crate::service::msg_processor`] and is left in `event_logs` for
+/// an operator to inspect.
+pub const DEFAULT_MAX_RETRY_COUNT: u64 = 5;
+
+/// Default `eth_getLogs` chunk size, in blocks.
+///
+/// Public providers cap log queries — commonly at 10k blocks or 10k returned
+/// logs — and reject anything wider with an error that carries no hint of the
+/// limit. Without a cap the indexer's request span grows by one poll interval
+/// on every failed cycle, so a long RPC outage eventually produces a range no
+/// provider will ever serve and the indexer stalls permanently. 2000 sits
+/// comfortably under every limit we have seen while still covering ~6.7h of
+/// Ethereum (12s blocks) or ~2.8h of Gnosis (5s blocks) per chunk.
+pub const DEFAULT_MAX_BLOCK_RANGE: u64 = 2000;
 
 impl Config {
     /// Parse comma-separated RPC URLs from environment variable
@@ -58,6 +156,97 @@ impl Config {
         self.gc_bc_rpc.first().map(|s| s.as_str())
     }
 
+    /// Block processing mode for a chain (`"eth"` / `"gc"`). All indexers on a
+    /// chain share its mode, so both bridges on that side move together.
+    /// An unrecognised chain falls back to the conservative default.
+    pub fn mode_for_chain(&self, chain: &str) -> BlockProcessingMode {
+        match chain {
+            "eth" => self.eth_block_processing_mode,
+            "gc" => self.gc_block_processing_mode,
+            _ => BlockProcessingMode::default(),
+        }
+    }
+
+    /// Set the mode for a chain. Used by the startup preflight to downgrade a
+    /// chain to `block-finality` when no configured RPC can serve `safe`.
+    pub fn set_mode_for_chain(&mut self, chain: &str, mode: BlockProcessingMode) {
+        match chain {
+            "eth" => self.eth_block_processing_mode = mode,
+            "gc" => self.gc_block_processing_mode = mode,
+            _ => tracing::warn!(
+                "Ignoring block processing mode for unknown chain '{}'",
+                chain
+            ),
+        }
+    }
+
+    /// Chains currently running in fcr mode, with their EL RPC arrays.
+    /// Empty when every chain is on `block-finality` — the fcr checker uses
+    /// this to decide whether it needs to run at all.
+    pub fn fcr_chains(&self) -> Vec<(&'static str, &[String])> {
+        let mut chains = Vec::new();
+        if self.eth_block_processing_mode.is_fcr() {
+            chains.push(("eth", self.eth_rpc.as_slice()));
+        }
+        if self.gc_block_processing_mode.is_fcr() {
+            chains.push(("gc", self.gc_rpc.as_slice()));
+        }
+        chains
+    }
+
+    /// Beacon RPC (if configured) + EL RPC fallbacks for a chain, in the order
+    /// the finality resolver should try them.
+    pub fn finality_rpcs_for_chain(&self, chain: &str) -> (Option<&str>, &[String]) {
+        match chain {
+            "eth" => (self.get_eth_bc_rpc(), self.eth_rpc.as_slice()),
+            _ => (self.get_gc_bc_rpc(), self.gc_rpc.as_slice()),
+        }
+    }
+
+    /// Bridge modes (the `event_logs.bridge_mode` values) belonging to a chain.
+    pub fn bridge_modes_for_chain(chain: &str) -> [&'static str; 2] {
+        match chain {
+            "eth" => ["AMB_ETH", "XDAI_ETH"],
+            _ => ["AMB_GC", "XDAI_GC"],
+        }
+    }
+
+    /// Read a positive integer from `name`, falling back to `default` when the
+    /// variable is unset, empty, unparseable, or zero.
+    ///
+    /// Unset and malformed must land on the *same* value: an operator who
+    /// mistypes an interval otherwise gets a cadence that appears nowhere in
+    /// their configuration and nowhere in the docs. Zero is rejected along with
+    /// unparseable values — for the interval knobs a zero sleep turns the loop
+    /// into a hot loop hammering the RPC, for the retry ceiling it stalls the
+    /// pipeline outright, and for the chunk size it advances the indexer's
+    /// cursor by nothing, all worse outcomes than ignoring the typo.
+    /// Unlike the block processing mode, a bad value here cannot silently
+    /// change *what* the validator does — only how often, or how many times —
+    /// so it warns rather than failing startup.
+    fn positive_u64_from_env(name: &str, default: u64) -> u64 {
+        let raw = match env::var(name) {
+            Ok(raw) => raw,
+            Err(_) => return default,
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return default;
+        }
+        match trimmed.parse::<u64>() {
+            Ok(0) | Err(_) => {
+                tracing::warn!(
+                    "Invalid {} '{}' (expected a positive integer); falling back to {}",
+                    name,
+                    trimmed,
+                    default
+                );
+                default
+            }
+            Ok(value) => value,
+        }
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let eth_rpc: Vec<String> = Self::parse_rpc_urls(
             env::var("ETH_RPC").map_err(|err| format!("Error reading ETH_RPC: {}", err))?,
@@ -65,12 +254,13 @@ impl Config {
         let gc_rpc: Vec<String> = Self::parse_rpc_urls(
             env::var("GC_RPC").map_err(|err| format!("Error reading GC_RPC: {}", err))?,
         );
-        let eth_bc_rpc: Vec<String> =
-            env::var("ETH_BC_RPC").map(Self::parse_rpc_urls).unwrap_or_default();
-        let gc_bc_rpc: Vec<String> =
-            env::var("GC_BC_RPC").map(Self::parse_rpc_urls).unwrap_or_default();
+        let eth_bc_rpc: Vec<String> = env::var("ETH_BC_RPC")
+            .map(Self::parse_rpc_urls)
+            .unwrap_or_default();
+        let gc_bc_rpc: Vec<String> = env::var("GC_BC_RPC")
+            .map(Self::parse_rpc_urls)
+            .unwrap_or_default();
 
-        // Validate that at least one RPC URL is provided for each
         if eth_rpc.is_empty() {
             return Err("ETH_RPC must contain at least one valid URL".to_string());
         }
@@ -132,14 +322,37 @@ impl Config {
                 .unwrap_or_else(|_| "0x7d94ece17e81355326e3359115D4B02411825EdD".to_string())
                 .parse()
                 .map_err(|err| format!("Error parsing AMB_BRIDGE_HELPER_ADDRESS: {}", err))?,
-            poll_interval_secs: env::var("POLL_INTERVAL_SECS")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(5),
-            max_retry_count: env::var("MAX_RETRY_COUNT")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse()
-                .unwrap_or(5),
+            poll_interval_secs: Self::positive_u64_from_env(
+                "POLL_INTERVAL_SECS",
+                DEFAULT_POLL_INTERVAL_SECS,
+            ),
+            fcr_check_interval_secs: Self::positive_u64_from_env(
+                "FCR_CHECK_INTERVAL_SECS",
+                DEFAULT_FCR_CHECK_INTERVAL_SECS,
+            ),
+            max_retry_count: Self::positive_u64_from_env(
+                "MAX_RETRY_COUNT",
+                DEFAULT_MAX_RETRY_COUNT,
+            ),
+            max_block_range: Self::positive_u64_from_env(
+                "MAX_BLOCK_RANGE",
+                DEFAULT_MAX_BLOCK_RANGE,
+            ),
+            // ETH defaults to fcr: at ~12s versus ~12.8m, safe-block indexing is
+            // what makes ETH->GC relaying usable, and the reorg window it opens
+            // is closed after the fact by the fcr checker. The startup preflight
+            // downgrades it when no configured ETH_RPC can serve `safe`, so this
+            // default cannot silently fail open. GC stays conservative: that is
+            // the signature-collection direction, where this validator's
+            // signature is an irreversible commitment.
+            eth_block_processing_mode: BlockProcessingMode::from_env(
+                "ETH_BLOCK_PROCESSING_MODE",
+                BlockProcessingMode::Fcr,
+            )?,
+            gc_block_processing_mode: BlockProcessingMode::from_env(
+                "GC_BLOCK_PROCESSING_MODE",
+                BlockProcessingMode::BlockFinality,
+            )?,
         })
     }
 }
